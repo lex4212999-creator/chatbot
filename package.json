@@ -1,0 +1,40 @@
+{
+  "name": "chatbot",
+  "version": "1.0.0",
+  "description": "none",
+  "homepage": "https://github.com/lex4212999-creator/chatbot#readme",
+  "bugs": {
+    "url": "https://github.com/lex4212999-creator/chatbot/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lex4212999-creator/chatbot.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "body-parser": "^2.2.1",
+    "connect-mongo": "^6.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "ejs": "^3.1.10",
+    "express": "^5.2.1",
+    "express-session": "^1.18.2",
+    "mongoose": "^9.0.0",
+    "morgan": "^1.10.1",
+    "multer": "^2.0.2",
+    "natural": "^8.1.0",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0",
+    "socket.io": "^4.8.1",
+    "sqlite3": "^5.1.7",
+    "whatsapp-web.js": "^1.34.2",
+    "xlsx": "^0.18.5"
+  }
+}

@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <title>Dashboard Chatbot WA</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 20px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; }
+    .status { margin-bottom: 12px; }
+    #qrCanvas { width: 256px; height: 256px; border: 1px dashed #aaa; }
+    label { display: block; margin: 8px 0 4px; }
+    input, textarea { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 6px; }
+    button { padding: 8px 12px; border: none; border-radius: 6px; background: #0b5; color: #fff; cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { border: 1px solid #eee; padding: 8px; text-align: left; }
+    .muted { color: #555; }
+  </style>
+</head>
+<body>
+  <h1>Dashboard Chatbot WhatsApp</h1>
+  <p class="muted">Scan QR hanya sekali; session tersimpan. Tambahkan QA di sini.</p>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Status & Scan</h2>
+      <div class="status">
+        <strong>Status:</strong> <span id="statusText">Menunggu...</span>
+      </div>
+      <canvas id="qrCanvas"></canvas>
+      <p id="qrHelp" class="muted">Jika sudah authenticated, QR tidak akan tampil.</p>
+    </div>
+
+    <div class="card">
+      <h2>Tambah QA</h2>
+      <form id="qaForm">
+        <label>Pertanyaan</label>
+        <input type="text" id="question" placeholder="contoh: Jam operasional toko?" required />
+        <label>Jawaban</label>
+        <textarea id="answer" rows="4" placeholder="contoh: Kami buka setiap hari pukul 09:00-21:00." required></textarea>
+        <button type="submit">Simpan</button>
+      </form>
+      <div id="qaMsg" class="muted"></div>
+
+      <h3>Data QA</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th><th>Pertanyaan</th><th>Jawaban</th><th>Dibuat</th>
+          </tr>
+        </thead>
+        <tbody id="qaTableBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
+  <script>
+    const socket = io();
+    const statusText = document.getElementById('statusText');
+    const qrCanvas = document.getElementById('qrCanvas');
+    const qaForm = document.getElementById('qaForm');
+    const qaMsg = document.getElementById('qaMsg');
+    const qaTableBody = document.getElementById('qaTableBody');
+
+    function setStatus(text) { statusText.textContent = text; }
+
+    socket.on('qr', ({ qr }) => {
+      setStatus('Silakan scan QR di ponsel WhatsApp Anda.');
+      QRCode.toCanvas(qrCanvas, qr, { width: 256 }, (err) => {
+        if (err) console.error(err);
+      });
+    });
+
+    socket.on('status', (st) => {
+      if (st.state === 'authenticated') setStatus('Authenticated. Menunggu ready...');
+      else if (st.state === 'ready') {
+        setStatus('Siap. Terhubung ke WhatsApp.');
+        const ctx = qrCanvas.getContext('2d');
+        ctx.clearRect(0, 0, qrCanvas.width, qrCanvas.height);
+      } else if (st.state === 'disconnected') setStatus('Terputus: ' + (st.reason || ''));
+      else if (st.state === 'auth_failure') setStatus('Gagal autentikasi.');
+      else setStatus(st.state);
+    });
+
+    async function loadQA() {
+      const res = await fetch('/api/qa');
+      const data = await res.json();
+      qaTableBody.innerHTML = data.map(r => `
+        <tr>
+          <td>${r.id}</td>
+          <td>${r.question}</td>
+          <td>${r.answer}</td>
+          <td>${r.created_at}</td>
+        </tr>
+      `).join('');
+    }
+
+    qaForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const question = document.getElementById('question').value.trim();
+      const answer = document.getElementById('answer').value.trim();
+      if (!question || !answer) return;
+
+      const res = await fetch('/api/qa', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question, answer })
+      });
+
+      if (res.ok) {
+        qaMsg.textContent = 'Berhasil disimpan.';
+        qaForm.reset();
+        loadQA();
+      } else {
+        const err = await res.json();
+        qaMsg.textContent = 'Gagal: ' + (err.error || 'unknown');
+      }
+    });
+
+    loadQA();
+  </script>
+</body>
+</html>
