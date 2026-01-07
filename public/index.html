@@ -31,26 +31,78 @@
       <canvas id="qrCanvas"></canvas>
       <p id="qrHelp" class="muted">Jika sudah authenticated, QR tidak akan tampil.</p>
     </div>
+    <div class="card">
+  <h2>Upload Excel Produk</h2>
+  <form id="excelForm">
+    <input type="file" id="excelFile" accept=".xlsx,.xls" required />
+    <button type="submit">Upload</button>
+  </form>
+  <div id="excelMsg" class="muted"></div>
+</div>
 
     <div class="card">
       <h2>Tambah QA</h2>
-      <form id="qaForm">
-        <label>Pertanyaan</label>
-        <input type="text" id="question" placeholder="contoh: Jam operasional toko?" required />
-        <label>Jawaban</label>
-        <textarea id="answer" rows="4" placeholder="contoh: Kami buka setiap hari pukul 09:00-21:00." required></textarea>
-        <button type="submit">Simpan</button>
-      </form>
-      <div id="qaMsg" class="muted"></div>
+        <form id="qaForm">
+          <input type="hidden" id="qaId" />
+          <label>Pertanyaan</label>
+          <input type="text" id="question" placeholder="contoh: Jam operasional toko?" required />
+          <label>Jawaban</label>
+          <textarea id="answer" rows="4" placeholder="contoh: Kami buka setiap hari pukul 09:00-21:00." required></textarea>
+          <div style="margin-top:8px">
+            <button type="submit" id="saveBtn">Simpan</button>
+            <button type="button" id="updateBtn" style="display:none; background:#08f">Update</button>
+            <button type="button" id="cancelEditBtn" style="display:none; background:#888">Batal</button>
+          </div>
+        </form>
+        <div id="qaMsg" class="muted"></div>
 
-      <h3>Data QA</h3>
+        <h3>Data QA</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th><th>Pertanyaan</th><th>Jawaban</th><th>Dibuat</th><th>Aksi</th>
+            </tr>
+          </thead>
+          <tbody id="qaTableBody"></tbody>
+        </table>
+    </div>
+    <div class="card">
+      <h2>Jadwal Rental (Tambah & Lihat)</h2>
+      <form id="scheduleForm">
+        <label>Jenis / Tipe</label>
+        <input type="text" id="vehicle_type" placeholder="contoh: NMAX" required />
+        <label>Nama</label>
+        <input type="text" id="name" placeholder="Nama penanggung / pemesan" required />
+        <label>Plate (pilih dari daftar)</label>
+        <select id="plateSelect">
+          <option value="">-- pilih plate --</option>
+          <option value="__other__">(lainnya...)</option>
+        </select>
+        <input type="text" id="plate" placeholder="contoh: NMAX PUTIH 5292" style="display:none; margin-top:8px" />
+        <label>Entry (opsional)</label>
+        <input type="text" id="entry_text" placeholder="opsional: teks lengkap jadwal" />
+        <label>Hari Antar (ISI SEBAGAI START) — format DD/MM (tanpa tahun)</label>
+        <input type="text" id="delivery_day" placeholder="DD/MM" />
+        <label>Jam Antar (START) — format HH:MM</label>
+        <input type="text" id="delivery_time" placeholder="07:00" />
+        <label>Hari Ambil (ISI SEBAGAI END) — format DD/MM (tanpa tahun)</label>
+        <input type="text" id="pickup_day" placeholder="DD/MM" />
+        <label>Jam Ambil (END) — format HH:MM</label>
+        <input type="text" id="pickup_time" placeholder="09:00" />
+        <label>Lokasi Penjemputan</label>
+        <input type="text" id="pickup" placeholder="contoh: jw naungan" />
+        <label>Lokasi Pengambilan</label>
+        <input type="text" id="dropoff" placeholder="contoh: balapan" />
+        <label>Total Harga (angka)</label>
+        <input type="text" id="total_price" placeholder="contoh: 380" />
+        <div style="margin-top:8px"><button type="submit">Tambah Jadwal</button></div>
+      </form>
+      <div id="schedMsg" class="muted"></div>
+
+      <h3>Daftar Jadwal (terbaru)</h3>
       <table>
-        <thead>
-          <tr>
-            <th>ID</th><th>Pertanyaan</th><th>Jawaban</th><th>Dibuat</th>
-          </tr>
-        </thead>
-        <tbody id="qaTableBody"></tbody>
+        <thead><tr><th>ID</th><th>Tipe</th><th>Plate</th><th>Nama</th><th>Hari Antar (START)</th><th>Jam Antar (START)</th><th>Hari Ambil (END)</th><th>Jam Ambil (END)</th><th>Pickup</th><th>Dropoff</th><th>Entry</th><th>Harga</th></tr></thead>
+        <tbody id="schedTableBody"></tbody>
       </table>
     </div>
   </div>
@@ -64,6 +116,10 @@
     const qaForm = document.getElementById('qaForm');
     const qaMsg = document.getElementById('qaMsg');
     const qaTableBody = document.getElementById('qaTableBody');
+    const qaIdInput = document.getElementById('qaId');
+    const saveBtn = document.getElementById('saveBtn');
+    const updateBtn = document.getElementById('updateBtn');
+    const cancelEditBtn = document.getElementById('cancelEditBtn');
 
     function setStatus(text) { statusText.textContent = text; }
 
@@ -85,6 +141,25 @@
       else setStatus(st.state);
     });
 
+    function enterEditMode(id, question, answer) {
+      qaIdInput.value = id;
+      document.getElementById('question').value = question;
+      document.getElementById('answer').value = answer;
+      saveBtn.style.display = 'none';
+      updateBtn.style.display = '';
+      cancelEditBtn.style.display = '';
+      qaMsg.textContent = 'Mode edit: menyunting ID ' + id;
+    }
+
+    function resetForm() {
+      qaIdInput.value = '';
+      qaForm.reset();
+      saveBtn.style.display = '';
+      updateBtn.style.display = 'none';
+      cancelEditBtn.style.display = 'none';
+      qaMsg.textContent = '';
+    }
+
     async function loadQA() {
       const res = await fetch('/api/qa');
       const data = await res.json();
@@ -94,33 +169,251 @@
           <td>${r.question}</td>
           <td>${r.answer}</td>
           <td>${r.created_at}</td>
+          <td>
+            <button class="editBtn" data-id="${r.id}" data-question="${encodeURIComponent(r.question)}" data-answer="${encodeURIComponent(r.answer)}">Edit</button>
+            <button class="deleteBtn" data-id="${r.id}" style="background:#e44">Hapus</button>
+          </td>
         </tr>
       `).join('');
     }
 
     qaForm.addEventListener('submit', async (e) => {
       e.preventDefault();
+      const id = qaIdInput.value;
       const question = document.getElementById('question').value.trim();
       const answer = document.getElementById('answer').value.trim();
       if (!question || !answer) return;
 
-      const res = await fetch('/api/qa', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question, answer })
-      });
-
-      if (res.ok) {
-        qaMsg.textContent = 'Berhasil disimpan.';
-        qaForm.reset();
-        loadQA();
+      if (id) {
+        // update
+        const res = await fetch(`/api/qa/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question, answer })
+        });
+        if (res.ok) {
+          qaMsg.textContent = 'Berhasil diupdate.';
+          resetForm();
+          loadQA();
+        } else {
+          const err = await res.json();
+          qaMsg.textContent = 'Gagal update: ' + (err.error || 'unknown');
+        }
       } else {
-        const err = await res.json();
-        qaMsg.textContent = 'Gagal: ' + (err.error || 'unknown');
+        // create
+        const res = await fetch('/api/qa', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question, answer })
+        });
+        if (res.ok) {
+          qaMsg.textContent = 'Berhasil disimpan.';
+          qaForm.reset();
+          loadQA();
+        } else {
+          const err = await res.json();
+          qaMsg.textContent = 'Gagal: ' + (err.error || 'unknown');
+        }
+      }
+    });
+
+    // dedicated update button (in case user prefers clicking it)
+    updateBtn.addEventListener('click', (e) => qaForm.requestSubmit());
+    cancelEditBtn.addEventListener('click', resetForm);
+
+    // event delegation for edit/delete buttons
+    qaTableBody.addEventListener('click', async (e) => {
+      const el = e.target;
+      if (el.classList.contains('editBtn')) {
+        const id = el.getAttribute('data-id');
+        const q = decodeURIComponent(el.getAttribute('data-question') || '');
+        const a = decodeURIComponent(el.getAttribute('data-answer') || '');
+        enterEditMode(id, q, a);
+      } else if (el.classList.contains('deleteBtn')) {
+        const id = el.getAttribute('data-id');
+        if (!confirm('Hapus QA ID ' + id + '?')) return;
+        const res = await fetch(`/api/qa/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+          qaMsg.textContent = 'Terhapus.';
+          loadQA();
+        } else {
+          const err = await res.json();
+          qaMsg.textContent = 'Gagal hapus: ' + (err.error || 'unknown');
+        }
       }
     });
 
     loadQA();
   </script>
+
+  <script>
+    const scheduleForm = document.getElementById('scheduleForm');
+    const schedMsg = document.getElementById('schedMsg');
+    const schedTableBody = document.getElementById('schedTableBody');
+
+    async function loadSchedules() {
+      const res = await fetch('/api/schedules');
+      if (!res.ok) return;
+      const data = await res.json();
+      schedTableBody.innerHTML = data.map(s => `
+        <tr>
+          <td>${s.id}</td>
+          <td>${s.vehicle_type || ''}</td>
+          <td>${s.plate || ''}</td>
+          <td>${s.name || ''}</td>
+          <td>${s.delivery_day || s.start_date || ''}</td>
+          <td>${s.delivery_time || s.start_time || ''}</td>
+          <td>${s.pickup_day || s.end_date || ''}</td>
+          <td>${s.pickup_time || s.end_time || s.time || ''}</td>
+          <td>${s.pickup || ''}</td>
+          <td>${s.dropoff || ''}</td>
+          <td>${s.entry_text || ''}</td>
+          <td>${s.price || s.total_price || ''}</td>
+        </tr>
+      `).join('');
+    }
+
+    // load plates into dropdown
+    async function loadPlates() {
+      const sel = document.getElementById('plateSelect');
+      try {
+        const res = await fetch('/api/plates');
+        if (!res.ok) return;
+        const data = await res.json();
+        // remove previous dynamic options
+        sel.querySelectorAll('option[data-dynamic="1"]').forEach(o => o.remove());
+        data.forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p.plate;
+          opt.textContent = p.plate + (p.vehicle_type ? (' — ' + p.vehicle_type) : '');
+          opt.setAttribute('data-dynamic', '1');
+          sel.appendChild(opt);
+        });
+      } catch (err) {
+        console.error('loadPlates error', err);
+      }
+    }
+
+    document.getElementById('plateSelect').addEventListener('change', (e) => {
+      const v = e.target.value;
+      const plateInput = document.getElementById('plate');
+      const vehicleInput = document.getElementById('vehicle_type');
+      if (v === '__other__' || v === '') {
+        plateInput.style.display = v === '__other__' ? '' : 'none';
+        plateInput.value = '';
+        if (v === '') vehicleInput.value = '';
+      } else {
+        plateInput.style.display = 'none';
+        plateInput.value = v;
+        const opt = e.target.selectedOptions[0];
+        if (opt && opt.textContent.indexOf(' — ') !== -1) {
+          vehicleInput.value = opt.textContent.split(' — ')[1];
+        }
+      }
+    });
+
+      scheduleForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const plateSel = document.getElementById('plateSelect').value;
+      const plateVal = plateSel === '__other__' ? document.getElementById('plate').value.trim() : plateSel;
+      const pickupDay = document.getElementById('pickup_day').value.trim();
+      const pickupTime = document.getElementById('pickup_time').value.trim();
+      const deliveryDay = document.getElementById('delivery_day').value.trim();
+      const deliveryTime = document.getElementById('delivery_time').value.trim();
+      const pickup = document.getElementById('pickup').value.trim();
+      const dropoff = document.getElementById('dropoff').value.trim();
+      const totalPrice = document.getElementById('total_price').value.trim();
+      const entryRaw = document.getElementById('entry_text').value.trim();
+      if (!plateVal) { schedMsg.textContent = 'Pilih atau masukkan plate.'; return; }
+      if (!pickupDay || !pickupTime) { schedMsg.textContent = 'Hari dan jam ambil wajib diisi.'; return; }
+      // validate date format DD/MM without year and day ranges per month
+      const ddmmRe = /^\d{1,2}\/\d{1,2}$/;
+      if (!ddmmRe.test(pickupDay)) { schedMsg.textContent = 'Format hari ambil harus DD/MM (tanpa tahun).'; return; }
+      if (deliveryDay && !ddmmRe.test(deliveryDay)) { schedMsg.textContent = 'Format hari antar harus DD/MM (tanpa tahun).'; return; }
+      const thisYear = new Date().getFullYear();
+      const validDDMM = (s) => {
+        if (!s) return false;
+        const [dStr,mStr] = s.split('/');
+        const d = parseInt(dStr,10); const m = parseInt(mStr,10);
+        if (!(m >=1 && m <=12)) return false;
+        const days = new Date(thisYear, m, 0).getDate();
+        return d >=1 && d <= days;
+      };
+      if (!validDDMM(pickupDay)) { schedMsg.textContent = 'Hari ambil tidak valid untuk bulan tersebut.'; return; }
+      if (deliveryDay && !validDDMM(deliveryDay)) { schedMsg.textContent = 'Hari antar tidak valid untuk bulan tersebut.'; return; }
+      // validate time HH:MM and boundaries: delivery >= 06:00, pickup <= 23:00
+      const timeRe = /^\d{1,2}:\d{2}$/;
+      if (!timeRe.test(pickupTime)) { schedMsg.textContent = 'Format jam ambil harus HH:MM.'; return; }
+      if (deliveryTime && !timeRe.test(deliveryTime)) { schedMsg.textContent = 'Format jam antar harus HH:MM.'; return; }
+      const toMins = (t) => { const [hh,mm] = t.split(':').map(Number); return hh*60 + mm; };
+      if (deliveryTime) {
+        const dm = toMins(deliveryTime);
+        if (dm < 6*60) { schedMsg.textContent = 'Jam antar minimal 06:00.'; return; }
+      }
+      const pm = toMins(pickupTime);
+      if (pm > 23*60) { schedMsg.textContent = 'Jam ambil maksimal 23:00.'; return; }
+
+      const payload = {
+        vehicle_type: document.getElementById('vehicle_type').value.trim(),
+        name: document.getElementById('name').value.trim(),
+        plate: plateVal,
+        name: document.getElementById('name').value.trim(),
+        start_date: undefined,
+        start_time: undefined,
+        end_date: undefined,
+        end_time: undefined,
+        pickup_day: pickupDay,
+        pickup_time: pickupTime,
+        delivery_day: deliveryDay || undefined,
+        delivery_time: deliveryTime || undefined,
+        pickup_explicit: pickup || undefined,
+        dropoff_explicit: dropoff || undefined,
+        total_price: totalPrice || undefined,
+        entry_text: entryRaw || undefined
+      };
+      const res = await fetch('/api/schedules', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        schedMsg.textContent = 'Jadwal berhasil ditambahkan.';
+        scheduleForm.reset();
+        await loadPlates();
+        loadSchedules();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        schedMsg.textContent = 'Gagal: ' + (err.error || 'server error');
+      }
+    });
+
+    loadPlates();
+    loadSchedules();
+  </script>
+
+  <script>
+const excelForm = document.getElementById('excelForm');
+const excelMsg = document.getElementById('excelMsg');
+
+excelForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fileInput = document.getElementById('excelFile');
+  if (!fileInput.files.length) return;
+
+  const formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+
+  const res = await fetch('/api/upload-excel', {
+    method: 'POST',
+    body: formData
+  });
+
+  if (res.ok) {
+    const data = await res.json();
+    excelMsg.textContent = `Berhasil upload ${data.count} produk dari Excel.`;
+  } else {
+    const err = await res.json();
+    excelMsg.textContent = `Gagal: ${err.error}`;
+  }
+});
+</script>
 </body>
 </html>
