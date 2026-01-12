@@ -67,6 +67,32 @@
         </table>
     </div>
     <div class="card">
+      <h2>Motors Management</h2>
+      <form id="motorForm">
+        <label>Motor ID (kosongkan untuk tambah)</label>
+        <input type="text" id="motor_id_input" placeholder="otomatis untuk tambah" />
+        <label>Jenis</label>
+        <input type="text" id="motor_jenis" placeholder="contoh: VARIO" />
+        <label>Plate</label>
+        <input type="text" id="motor_plate" placeholder="contoh: VARIO HITAM 4793" />
+        <label>Harga 24 jam</label>
+        <input type="text" id="motor_harga_24" placeholder="contoh: 300000" />
+        <label>Harga 12 jam</label>
+        <input type="text" id="motor_harga_12" placeholder="contoh: 200000" />
+        <div style="margin-top:8px">
+          <button type="submit">Simpan Motor</button>
+          <button type="button" id="motorReset" style="background:#888">Batal</button>
+        </div>
+      </form>
+      <div id="motorMsg" class="muted"></div>
+
+      <h3>Daftar Motors</h3>
+      <table>
+        <thead><tr><th>ID</th><th>Jenis</th><th>Plate</th><th>24h</th><th>12h</th><th>Aksi</th></tr></thead>
+        <tbody id="motorTableBody"></tbody>
+      </table>
+    </div>
+    <div class="card">
       <h2>Jadwal Rental (Tambah & Lihat)</h2>
       <form id="scheduleForm">
         <label>Jenis / Tipe</label>
@@ -244,6 +270,86 @@
     });
 
     loadQA();
+  </script>
+
+  <script>
+    // Motors UI
+    const motorForm = document.getElementById('motorForm');
+    const motorMsg = document.getElementById('motorMsg');
+    const motorTableBody = document.getElementById('motorTableBody');
+    const motorReset = document.getElementById('motorReset');
+
+    async function loadMotors() {
+      const res = await fetch('/api/motors');
+      if (!res.ok) return;
+      const rows = await res.json();
+      motorTableBody.innerHTML = rows.map(r => `
+        <tr>
+          <td>${r.id}</td>
+          <td>${r.jenis || ''}</td>
+          <td>${r.plate || ''}</td>
+          <td>${r.harga_24 || ''}</td>
+          <td>${r.harga_12 || ''}</td>
+          <td>
+            <button class="motorEditBtn" data-id="${r.id}" data-jenis="${encodeURIComponent(r.jenis||'')}" data-plate="${encodeURIComponent(r.plate||'')}" data-h24="${encodeURIComponent(r.harga_24||'')}" data-h12="${encodeURIComponent(r.harga_12||'')}">Edit</button>
+            <button class="motorChangeIdBtn" data-id="${r.id}">Change ID</button>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    motorForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const id = document.getElementById('motor_id_input').value.trim();
+      const jenis = document.getElementById('motor_jenis').value.trim();
+      const plate = document.getElementById('motor_plate').value.trim();
+      const harga_24 = document.getElementById('motor_harga_24').value.trim();
+      const harga_12 = document.getElementById('motor_harga_12').value.trim();
+      if (!plate) { motorMsg.textContent = 'Plate wajib diisi.'; return; }
+      try {
+        if (id) {
+          const res = await fetch(`/api/motors/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jenis, plate, harga_24, harga_12 }) });
+          if (!res.ok) { const err = await res.json().catch(()=>({})); motorMsg.textContent = 'Gagal update: ' + (err.error || err.details || 'server'); return; }
+          motorMsg.textContent = 'Motor terupdate.';
+        } else {
+          const res = await fetch('/api/motors', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jenis, plate, harga_24, harga_12 }) });
+          if (!res.ok) { const err = await res.json().catch(()=>({})); motorMsg.textContent = 'Gagal tambah: ' + (err.error || err.details || 'server'); return; }
+          motorMsg.textContent = 'Motor ditambahkan.';
+        }
+        motorForm.reset();
+        loadMotors();
+      } catch (err) {
+        motorMsg.textContent = 'Error: ' + (err && err.message || err);
+      }
+    });
+
+    motorReset.addEventListener('click', () => { motorForm.reset(); motorMsg.textContent = ''; });
+
+    motorTableBody.addEventListener('click', async (ev) => {
+      const t = ev.target;
+      if (t.classList.contains('motorEditBtn')) {
+        const id = t.getAttribute('data-id');
+        document.getElementById('motor_id_input').value = id;
+        document.getElementById('motor_jenis').value = decodeURIComponent(t.getAttribute('data-jenis') || '');
+        document.getElementById('motor_plate').value = decodeURIComponent(t.getAttribute('data-plate') || '');
+        document.getElementById('motor_harga_24').value = decodeURIComponent(t.getAttribute('data-h24') || '');
+        document.getElementById('motor_harga_12').value = decodeURIComponent(t.getAttribute('data-h12') || '');
+        motorMsg.textContent = 'Mode edit untuk ID ' + id;
+      } else if (t.classList.contains('motorChangeIdBtn')) {
+        const oldId = t.getAttribute('data-id');
+        const newId = prompt('Masukkan new ID untuk motor ' + oldId + ' (harus unik):');
+        if (!newId) return;
+        if (isNaN(Number(newId))) { alert('ID harus numeric'); return; }
+        try {
+          const res = await fetch('/api/motors/change-id', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ oldId, newId }) });
+          if (!res.ok) { const err = await res.json().catch(()=>({})); motorMsg.textContent = 'Gagal change id: ' + (err.error || err.details || 'server'); return; }
+          motorMsg.textContent = `ID ${oldId} diubah menjadi ${newId}`;
+          loadMotors();
+        } catch (err) { motorMsg.textContent = 'Error: ' + (err && err.message || err); }
+      }
+    });
+
+    loadMotors();
   </script>
 
   <script>

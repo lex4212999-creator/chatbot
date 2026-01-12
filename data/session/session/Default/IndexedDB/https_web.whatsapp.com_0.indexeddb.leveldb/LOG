@@ -1,17 +1,19 @@
-2026/01/06-22:20:15.978 df4 Reusing MANIFEST C:\project\data\session\session\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
-2026/01/06-22:20:15.979 df4 Recovering log #949
-2026/01/06-22:20:16.124 df4 Reusing old log C:\project\data\session\session\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/000949.log 
-2026/01/06-22:20:22.102 688 Level-0 table #956: started
-2026/01/06-22:20:22.148 688 Level-0 table #956: 555948 bytes OK
-2026/01/06-22:20:22.153 688 Delete type=0 #949
-2026/01/06-22:20:22.154 688 Manual compaction at level-0 from ' )\x01\x00\x00\x00' @ 72057594037927935 : 1 .. ' *\x01\x00\x00\x00' @ 0 : 0; will stop at (end)
-2026/01/06-22:20:22.275 12c0 Compacting 1@1 + 3@2 files
-2026/01/06-22:20:22.862 12c0 Generated table #957@1: 83716 keys, 2262338 bytes
-2026/01/06-22:20:23.164 12c0 Generated table #958@1: 22377 keys, 2288197 bytes
-2026/01/06-22:20:23.509 12c0 Generated table #959@1: 34019 keys, 1710615 bytes
-2026/01/06-22:20:23.509 12c0 Compacted 1@1 + 3@2 files => 6261150 bytes
-2026/01/06-22:20:23.514 12c0 compacted to: files[ 0 0 3 0 0 0 0 ]
-2026/01/06-22:20:23.515 12c0 Delete type=2 #951
-2026/01/06-22:20:23.515 12c0 Delete type=2 #952
-2026/01/06-22:20:23.515 12c0 Delete type=2 #953
-2026/01/06-22:20:23.515 12c0 Delete type=2 #956
+2026/01/12-17:27:15.630 27f0 Reusing MANIFEST C:\project\data\session\session\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/01/12-17:27:15.631 27f0 Recovering log #1159
+2026/01/12-17:27:15.743 27f0 Reusing old log C:\project\data\session\session\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/001159.log 
+2026/01/12-17:27:26.882 1938 Level-0 table #1167: started
+2026/01/12-17:27:26.922 1938 Level-0 table #1167: 672975 bytes OK
+2026/01/12-17:27:26.926 1938 Delete type=0 #1159
+2026/01/12-17:27:26.928 1938 Manual compaction at level-0 from ' M\x01\x00\x00\x00' @ 72057594037927935 : 1 .. ' N\x01\x00\x00\x00' @ 0 : 0; will stop at (end)
+2026/01/12-17:27:27.148 32d4 Compacting 1@1 + 4@2 files
+2026/01/12-17:27:27.452 32d4 Generated table #1168@1: 87707 keys, 2237448 bytes
+2026/01/12-17:27:27.661 32d4 Generated table #1169@1: 52409 keys, 2412999 bytes
+2026/01/12-17:27:27.843 32d4 Generated table #1170@1: 25958 keys, 2218395 bytes
+2026/01/12-17:27:28.185 32d4 Generated table #1171@1: 36591 keys, 1814015 bytes
+2026/01/12-17:27:28.185 32d4 Compacted 1@1 + 4@2 files => 8682857 bytes
+2026/01/12-17:27:28.191 32d4 compacted to: files[ 0 0 4 0 0 0 0 ]
+2026/01/12-17:27:28.192 32d4 Delete type=2 #1161
+2026/01/12-17:27:28.192 32d4 Delete type=2 #1162
+2026/01/12-17:27:28.192 32d4 Delete type=2 #1163
+2026/01/12-17:27:28.192 32d4 Delete type=2 #1164
+2026/01/12-17:27:28.192 32d4 Delete type=2 #1167

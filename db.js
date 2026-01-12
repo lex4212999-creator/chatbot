@@ -60,6 +60,8 @@ db.serialize(() => {
       dropoff TEXT,
       time TEXT,
       price TEXT,
+      WA_1 TEXT,
+      WA_2 TEXT,
       start_date TEXT,
       end_date TEXT,
       start_time TEXT,
@@ -80,6 +82,8 @@ db.serialize(() => {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       jenis TEXT,
       plate TEXT,
+      harga_24 TEXT,
+      harga_12 TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -90,6 +94,11 @@ db.all(`PRAGMA table_info(schedules)`, [], (err, cols) => {
   const existing = (cols || []).map(c => c.name);
   const required = ['period','customer','location','time','price','entry_text','vehicle_type','plate','pickup','dropoff','start_date','end_date','start_time','end_time','total_price','name','pickup_day','pickup_time','delivery_day','delivery_time'];
   // include booking month column to support future bookings
+  // ensure WA columns exist
+  required.push('WA_1','WA_2');
+  // include per-day form number and client jid
+  if (!required.includes('no_form')) required.push('no_form');
+  if (!required.includes('client_jid')) required.push('client_jid');
   if (!existing.includes('bulan')) required.push('bulan');
   const toAdd = required.filter(c => !existing.includes(c));
   toAdd.forEach(col => {
@@ -106,6 +115,9 @@ db.all(`PRAGMA table_info(schedules)`, [], (err, cols) => {
       else console.log('Added motor_id column to schedules');
     });
   }
+
+  // ensure WA_1 and WA_2 exist on schedules
+  // NOTE: WA_1 and WA_2 are added via the generic `toAdd` loop above.
 
   // migrate distinct plates into motors table and update schedules.motor_id
   db.all(`SELECT DISTINCT plate FROM schedules WHERE plate IS NOT NULL AND plate != ''`, [], (err, plates) => {
@@ -126,6 +138,45 @@ db.all(`PRAGMA table_info(schedules)`, [], (err, cols) => {
         }
       });
     });
+  });
+
+  // ensure motors table has 'harga' column (migrate older schema)
+  db.all(`PRAGMA table_info(motors)`, [], (err2, mcols) => {
+    if (err2) return console.error('PRAGMA table_info(motors) error:', err2.message);
+    const mexisting = (mcols || []).map(c => c.name);
+    // legacy 'harga' column is no longer used; migration below handles mapping if present
+    // add harga_24 and harga_12 columns if missing
+    if (!mexisting.includes('harga_24')) {
+      db.run(`ALTER TABLE motors ADD COLUMN harga_24 TEXT`, (e) => {
+        if (e) console.error('Failed to add harga_24 to motors:', e.message);
+        else console.log('Added harga_24 column to motors');
+      });
+    }
+    if (!mexisting.includes('harga_12')) {
+      db.run(`ALTER TABLE motors ADD COLUMN harga_12 TEXT`, (e) => {
+        if (e) console.error('Failed to add harga_12 to motors:', e.message);
+        else console.log('Added harga_12 column to motors');
+      });
+    }
+    // If legacy 'harga' column exists, perform migration to remove it and keep harga_24 populated
+    if (mexisting.includes('harga')) {
+      try {
+        // perform safe migration: create new table without 'harga', copy data (map harga->harga_24), preserve ids
+        db.serialize(() => {
+          db.run('BEGIN TRANSACTION');
+          db.run(`CREATE TABLE IF NOT EXISTS motors_new (id INTEGER PRIMARY KEY, jenis TEXT, plate TEXT, harga_24 TEXT, harga_12 TEXT, created_at DATETIME)`);
+          db.run(`INSERT OR REPLACE INTO motors_new (id, jenis, plate, harga_24, harga_12, created_at) SELECT id, jenis, plate, COALESCE(harga, ''), COALESCE(harga_12, ''), created_at FROM motors` , (e) => {
+            if (e) console.error('Failed to copy motors to motors_new:', e.message);
+          });
+          db.run(`DROP TABLE IF EXISTS motors`, (e) => { if (e) console.error('Failed drop old motors table:', e.message); });
+          db.run(`ALTER TABLE motors_new RENAME TO motors`, (e) => { if (e) console.error('Failed rename motors_new:', e.message); });
+          db.run('COMMIT');
+          console.log('Migrated motors table: removed legacy harga column (mapped to harga_24)');
+        });
+      } catch (e) {
+        console.error('Motors migration error:', e && e.message);
+      }
+    }
   });
 
   // seed with 10 sample entries (only if empty)
@@ -182,6 +233,140 @@ function addQA(question, answer) {
   });
 }
 
+// Find motors availability relative to a requested window start and length.
+// Returns array of { id, jenis, plate, status: 'free'|'busy', freeAtMs: null|number }
+function findMotorsAvailability(startMs, hours, bufferMinutes, treatTodayAsBusy) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const motors = await listMotors();
+      const schedules = await listAllSchedules();
+
+      const windowStart = Number(startMs) || Date.now();
+      const windowEnd = windowStart + (Number(hours) || 12) * 3600 * 1000;
+      const bufferMs = (Number(bufferMinutes) || 30) * 60 * 1000;
+      const reqDate = new Date(windowStart);
+
+      const ddmmToDate = (ddmm, bulanHint) => {
+        if (!ddmm) return null;
+        const s = String(ddmm).trim();
+        // yyyy-mm-dd
+        let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+        if (m) return new Date(parseInt(m[1],10), parseInt(m[2],10) - 1, parseInt(m[3],10));
+        // dd/mm or dd/mm/yyyy
+        m = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+        if (m) {
+          const day = parseInt(m[1],10); const month = parseInt(m[2],10);
+          const year = m[3] ? (m[3].length === 2 ? 2000 + parseInt(m[3],10) : parseInt(m[3],10)) : (new Date()).getFullYear();
+          return new Date(year, month - 1, day);
+        }
+        // single day like '9'
+        m = s.match(/^(\d{1,2})$/);
+        if (m) {
+          const day = parseInt(m[1],10);
+          let month = (new Date()).getMonth() + 1; let year = (new Date()).getFullYear();
+          if (bulanHint) {
+            const bh = String(bulanHint).trim(); const bhm = bh.match(/^(\d{1,2})(?:\/(\d{2,4}))?$/);
+            if (bhm) { month = parseInt(bhm[1],10); if (bhm[2]) year = bhm[2].length === 2 ? 2000 + parseInt(bhm[2],10) : parseInt(bhm[2],10); }
+          }
+          return new Date(year, month - 1, day);
+        }
+        return null;
+      };
+      const timeToMinutes = (t) => {
+        if (!t) return null;
+        const mm = String(t).match(/(\d{1,2})[:\.]?(\d{2})?/);
+        if (!mm) return null;
+        const hh = parseInt(mm[1], 10); const mn = mm[2] ? parseInt(mm[2], 10) : 0;
+        return hh * 60 + mn;
+      };
+
+      const scheduleIntervalMs = (row) => {
+        let startDate = null, endDate = null;
+        if (row.pickup_day && row.pickup_time) {
+          const pd = ddmmToDate(row.pickup_day, row.bulan); const pm = timeToMinutes(row.pickup_time);
+          if (pd && pm != null) { const d = new Date(pd.getTime()); d.setHours(0,0,0,0); d.setMinutes(pm); startDate = d; }
+        }
+        if (!startDate && row.start_date && row.start_time) {
+          const sd = ddmmToDate(row.start_date, row.bulan); const sm = timeToMinutes(row.start_time);
+          if (sd && sm != null) { const d = new Date(sd.getTime()); d.setHours(0,0,0,0); d.setMinutes(sm); startDate = d; }
+        }
+        if (row.delivery_day && row.delivery_time) {
+          const dd = ddmmToDate(row.delivery_day, row.bulan); const dm = timeToMinutes(row.delivery_time);
+          if (dd && dm != null) { const d = new Date(dd.getTime()); d.setHours(0,0,0,0); d.setMinutes(dm); endDate = d; }
+        }
+        if (!endDate && row.end_date && row.end_time) {
+          const ed = ddmmToDate(row.end_date, row.bulan); const em = timeToMinutes(row.end_time);
+          if (ed && em != null) { const d = new Date(ed.getTime()); d.setHours(0,0,0,0); d.setMinutes(em); endDate = d; }
+        }
+        if (startDate && !endDate) endDate = new Date(startDate.getTime());
+        if (!startDate && endDate) startDate = new Date(endDate.getTime());
+        if (!startDate && !endDate) return null;
+        return { startMs: startDate.getTime(), endMs: endDate.getTime() };
+      };
+
+      const result = [];
+      for (const m of motors) {
+        const motorSchedules = schedules.filter(s => (s.motor_id != null && String(s.motor_id) === String(m.id)) || ((s.motor_plate || s.plate || '') && (s.motor_plate || s.plate || '').toLowerCase() === (m.plate || '').toLowerCase()));
+        let busy = false;
+        let maxOverlappingEnd = null;
+        let minOverlappingStart = null;
+        // DEBUG
+        if (m.jenis === 'beat' || m.jenis === 'scoppy') {
+          console.log(`[DEBUG] Motor: ${m.jenis} (id=${m.id}, plate=${m.plate}), found ${motorSchedules.length} schedules`);
+        }
+        // If caller wants 'today' treated specially, mark busy if any schedule exists on same day
+        for (const s of motorSchedules) {
+          const iv = scheduleIntervalMs(s);
+          if (!iv) continue;
+          // DEBUG
+          if (m.jenis === 'beat' || m.jenis === 'scoppy') {
+            console.log(`  [DEBUG] Schedule: pickup=${new Date(iv.startMs)}, delivery=${new Date(iv.endMs)}`);
+            console.log(`  [DEBUG] Window: ${new Date(windowStart)} to ${new Date(windowEnd)}`);
+            console.log(`  [DEBUG] Overlap? ${iv.endMs >= windowStart && iv.startMs <= windowEnd}`);
+          }
+          // overlap with the requested window
+          if (iv.endMs >= windowStart && iv.startMs <= windowEnd) {
+            busy = true;
+            if (maxOverlappingEnd == null || iv.endMs > maxOverlappingEnd) maxOverlappingEnd = iv.endMs;
+            if (minOverlappingStart == null || iv.startMs < minOverlappingStart) minOverlappingStart = iv.startMs;
+            // continue checking to find latest end
+          }
+          // if treatTodayAsBusy is true and schedule start is on same day as request, mark busy
+          if (treatTodayAsBusy) {
+            const sStart = iv.startMs;
+            if (sStart) {
+              const sd = new Date(sStart);
+              if (sd.getDate() === reqDate.getDate() && sd.getMonth() === reqDate.getMonth() && sd.getFullYear() === reqDate.getFullYear()) {
+                busy = true;
+                if (maxOverlappingEnd == null || iv.endMs > maxOverlappingEnd) maxOverlappingEnd = iv.endMs;
+                if (minOverlappingStart == null || iv.startMs < minOverlappingStart) minOverlappingStart = iv.startMs;
+              }
+            }
+          }
+        }
+
+        if (!busy) {
+          result.push({ id: m.id, jenis: m.jenis, plate: m.plate, status: 'free', freeAtMs: null, nextPickupMs: null });
+        } else {
+          const freeAt = (maxOverlappingEnd || windowStart) + bufferMs;
+          result.push({ id: m.id, jenis: m.jenis, plate: m.plate, status: 'busy', freeAtMs: freeAt, nextPickupMs: minOverlappingStart || null });
+        }
+        // DEBUG
+        if (m.jenis === 'beat' || m.jenis === 'scoppy') {
+          console.log(`  [DEBUG] Final status: ${busy ? 'BUSY' : 'FREE'}, nextPickupMs=${minOverlappingStart || null}`);
+        }
+      }
+
+      result.sort((a,b) => {
+        if (a.status === b.status) return (a.id || 0) - (b.id || 0);
+        return a.status === 'free' ? -1 : 1;
+      });
+      resolve(result);
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
 function listQA() {
   return new Promise((resolve, reject) => {
     db.all(`SELECT id, question, answer, created_at FROM qa ORDER BY id DESC`, [], (err, rows) => {
@@ -234,10 +419,10 @@ function getQA(id) {
 // minimal schedules CRUD: add and list
 function addSchedule(item) {
   return new Promise((resolve, reject) => {
-    const { vehicle_type, motor_id, plate, name, entry_text, period, customer, location, pickup, dropoff, time, price, start_date, end_date, start_time, end_time, total_price, pickup_day, pickup_time, delivery_day, delivery_time, bulan } = item;
+    const { vehicle_type, motor_id, plate, name, entry_text, period, customer, location, pickup, dropoff, time, price, WA_1, WA_2, start_date, end_date, start_time, end_time, total_price, pickup_day, pickup_time, delivery_day, delivery_time, bulan, no_form, client_jid } = item;
     db.run(
-      `INSERT INTO schedules (vehicle_type, motor_id, plate, name, entry_text, period, customer, location, pickup, dropoff, time, price, start_date, end_date, start_time, end_time, total_price, pickup_day, pickup_time, delivery_day, delivery_time, bulan) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [vehicle_type, motor_id || null, plate || '', name || '', entry_text || '', period || '', customer || '', location || '', pickup || '', dropoff || '', time || '', price || '', start_date || '', end_date || '', start_time || '', end_time || '', total_price || '', pickup_day || '', pickup_time || '', delivery_day || '', delivery_time || '', bulan || ''],
+      `INSERT INTO schedules (vehicle_type, motor_id, plate, name, entry_text, period, customer, location, pickup, dropoff, time, price, WA_1, WA_2, start_date, end_date, start_time, end_time, total_price, pickup_day, pickup_time, delivery_day, delivery_time, bulan, no_form, client_jid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [vehicle_type, motor_id || null, plate || '', name || '', entry_text || '', period || '', customer || '', location || '', pickup || '', dropoff || '', time || '', price || '', WA_1 || '', WA_2 || '', start_date || '', end_date || '', start_time || '', end_time || '', total_price || '', pickup_day || '', pickup_time || '', delivery_day || '', delivery_time || '', bulan || '', no_form || '', client_jid || ''],
       function (err) {
         if (err) return reject(err);
         resolve({ id: this.lastID, ...item });
@@ -248,7 +433,7 @@ function addSchedule(item) {
 
 function listSchedules() {
   return new Promise((resolve, reject) => {
-    db.all(`SELECT s.id, s.vehicle_type, s.motor_id, m.jenis as motor_jenis, m.plate as motor_plate, s.plate, s.name, s.entry_text, s.period, s.customer, s.location, s.pickup, s.dropoff, s.time, s.price, s.start_date, s.end_date, s.start_time, s.end_time, s.total_price, s.pickup_day, s.pickup_time, s.delivery_day, s.delivery_time, s.bulan, s.created_at FROM schedules s LEFT JOIN motors m ON s.motor_id = m.id ORDER BY s.id DESC LIMIT 100`, [], (err, rows) => {
+    db.all(`SELECT s.id, s.no_form, s.client_jid, s.vehicle_type, s.motor_id, m.jenis as motor_jenis, m.plate as motor_plate, s.plate, s.name, s.entry_text, s.period, s.customer, s.location, s.pickup, s.dropoff, s.time, s.price, s.WA_1, s.WA_2, s.start_date, s.end_date, s.start_time, s.end_time, s.total_price, s.pickup_day, s.pickup_time, s.delivery_day, s.delivery_time, s.bulan, s.created_at FROM schedules s LEFT JOIN motors m ON s.motor_id = m.id ORDER BY s.id DESC LIMIT 100`, [], (err, rows) => {
       if (err) return reject(err);
       resolve(rows);
     });
@@ -258,7 +443,7 @@ function listSchedules() {
 function listAllSchedules() {
   return new Promise((resolve, reject) => {
     // order by motor_id (ascending, nulls last) then by schedule id ascending
-    db.all(`SELECT s.id, s.vehicle_type, s.motor_id, m.jenis as motor_jenis, m.plate as motor_plate, s.plate, s.name, s.entry_text, s.period, s.customer, s.location, s.pickup, s.dropoff, s.time, s.price, s.start_date, s.end_date, s.start_time, s.end_time, s.total_price, s.pickup_day, s.pickup_time, s.delivery_day, s.delivery_time, s.bulan, s.created_at FROM schedules s LEFT JOIN motors m ON s.motor_id = m.id ORDER BY COALESCE(s.motor_id, 999999), s.motor_id, s.id ASC`, [], (err, rows) => {
+    db.all(`SELECT s.id, s.no_form, s.client_jid, s.vehicle_type, s.motor_id, m.jenis as motor_jenis, m.plate as motor_plate, s.plate, s.name, s.entry_text, s.period, s.customer, s.location, s.pickup, s.dropoff, s.time, s.price, s.WA_1, s.WA_2, s.start_date, s.end_date, s.start_time, s.end_time, s.total_price, s.pickup_day, s.pickup_time, s.delivery_day, s.delivery_time, s.bulan, s.created_at FROM schedules s LEFT JOIN motors m ON s.motor_id = m.id ORDER BY COALESCE(s.motor_id, 999999), s.motor_id, s.id ASC`, [], (err, rows) => {
       if (err) return reject(err);
       resolve(rows);
     });
@@ -355,7 +540,7 @@ function listSchedulesFull() {
 
 function getLatestScheduleByPlate(plate) {
   return new Promise((resolve, reject) => {
-    db.get(`SELECT id, vehicle_type, motor_id, plate, name, entry_text, period, customer, location, pickup, dropoff, time, price, start_date, end_date, start_time, end_time, total_price, pickup_day, pickup_time, delivery_day, delivery_time, bulan, created_at FROM schedules WHERE plate = ? ORDER BY id DESC LIMIT 1`, [plate], (err, row) => {
+    db.get(`SELECT id, vehicle_type, motor_id, plate, name, entry_text, period, customer, location, pickup, dropoff, time, price, WA_1, WA_2, start_date, end_date, start_time, end_time, total_price, pickup_day, pickup_time, delivery_day, delivery_time, bulan, created_at FROM schedules WHERE plate = ? ORDER BY id DESC LIMIT 1`, [plate], (err, row) => {
       if (err) return reject(err);
       resolve(row);
     });
@@ -364,7 +549,7 @@ function getLatestScheduleByPlate(plate) {
 
 function getLatestScheduleByMotorId(motorId) {
   return new Promise((resolve, reject) => {
-    db.get(`SELECT s.id, s.vehicle_type, s.motor_id, m.jenis as motor_jenis, m.plate as motor_plate, s.plate, s.name, s.entry_text, s.period, s.customer, s.location, s.pickup, s.dropoff, s.time, s.price, s.start_date, s.end_date, s.start_time, s.end_time, s.total_price, s.pickup_day, s.pickup_time, s.delivery_day, s.delivery_time, s.bulan, s.created_at FROM schedules s LEFT JOIN motors m ON s.motor_id = m.id WHERE s.motor_id = ? ORDER BY s.id DESC LIMIT 1`, [motorId], (err, row) => {
+    db.get(`SELECT s.id, s.vehicle_type, s.motor_id, m.jenis as motor_jenis, m.plate as motor_plate, s.plate, s.name, s.entry_text, s.period, s.customer, s.location, s.pickup, s.dropoff, s.time, s.price, s.WA_1, s.WA_2, s.start_date, s.end_date, s.start_time, s.end_time, s.total_price, s.pickup_day, s.pickup_time, s.delivery_day, s.delivery_time, s.bulan, s.created_at FROM schedules s LEFT JOIN motors m ON s.motor_id = m.id WHERE s.motor_id = ? ORDER BY s.id DESC LIMIT 1`, [motorId], (err, row) => {
       if (err) return reject(err);
       resolve(row);
     });
@@ -373,7 +558,7 @@ function getLatestScheduleByMotorId(motorId) {
 
 function getMotorById(id) {
   return new Promise((resolve, reject) => {
-    db.get(`SELECT id, jenis, plate, created_at FROM motors WHERE id = ?`, [id], (err, row) => {
+    db.get(`SELECT id, jenis, plate, harga_24, harga_12, created_at FROM motors WHERE id = ?`, [id], (err, row) => {
       if (err) return reject(err);
       resolve(row);
     });
@@ -382,7 +567,7 @@ function getMotorById(id) {
 
 function addMotor(jenis, plate) {
   return new Promise((resolve, reject) => {
-    db.run(`INSERT INTO motors (jenis, plate) VALUES (?, ?)`, [jenis || '', plate || ''], function (err) {
+    db.run(`INSERT INTO motors (jenis, plate, harga_24, harga_12) VALUES (?, ?, ?, ?)`, [jenis || '', plate || '', ''], function (err) {
       if (err) return reject(err);
       resolve({ id: this.lastID, jenis: jenis || '', plate: plate || '' });
     });
@@ -391,9 +576,25 @@ function addMotor(jenis, plate) {
 
 function listMotors() {
   return new Promise((resolve, reject) => {
-    db.all(`SELECT id, jenis, plate, created_at FROM motors ORDER BY id`, [], (err, rows) => {
+    db.all(`SELECT id, jenis, plate, harga_24, harga_12, created_at FROM motors ORDER BY id`, [], (err, rows) => {
       if (err) return reject(err);
       resolve(rows || []);
+    });
+  });
+}
+
+function updateMotor(id, jenis, plate, harga_24, harga_12) {
+  return new Promise((resolve, reject) => {
+    // update core columns; harga column removed — update harga_24/harga_12
+    const setters = ['jenis = ?', 'plate = ?'];
+    const params = [jenis || '', plate || ''];
+    if (typeof harga_24 !== 'undefined') { setters.push('harga_24 = ?'); params.push(harga_24 || ''); }
+    if (typeof harga_12 !== 'undefined') { setters.push('harga_12 = ?'); params.push(harga_12 || ''); }
+    params.push(id);
+    const sql = `UPDATE motors SET ${setters.join(', ')} WHERE id = ?`;
+    db.run(sql, params, function (err) {
+      if (err) return reject(err);
+      resolve({ changes: this.changes });
     });
   });
 }
@@ -523,6 +724,37 @@ function deleteMotor(id) {
   });
 }
 
+function changeMotorId(oldId, newId) {
+  return new Promise((resolve, reject) => {
+    if (!oldId || !newId) return reject(new Error('oldId and newId required'));
+    const oldN = Number(oldId);
+    const newN = Number(newId);
+    if (isNaN(oldN) || isNaN(newN)) return reject(new Error('IDs must be numeric'));
+    db.get(`SELECT id FROM motors WHERE id = ?`, [newN], (err, row) => {
+      if (err) return reject(err);
+      if (row) return reject(new Error('newId already exists'));
+      // perform update in transaction: change motors.id and update schedules.motor_id
+      db.serialize(() => {
+        db.run('BEGIN TRANSACTION');
+        db.run(`UPDATE motors SET id = ? WHERE id = ?`, [newN, oldN], function (err2) {
+          if (err2) {
+            db.run('ROLLBACK');
+            return reject(err2);
+          }
+          db.run(`UPDATE schedules SET motor_id = ? WHERE motor_id = ?`, [newN, oldN], function (err3) {
+            if (err3) {
+              db.run('ROLLBACK');
+              return reject(err3);
+            }
+            db.run('COMMIT');
+            resolve({ changedMotorRows: this.changes });
+          });
+        });
+      });
+    });
+  });
+}
+
 function clearData() {
   return new Promise((resolve, reject) => {
     db.serialize(() => {
@@ -570,7 +802,7 @@ function deleteSchedulesByPickupDay(dayString) {
 
 function listPlates() {
   return new Promise((resolve, reject) => {
-    db.all(`SELECT id, jenis, plate FROM motors ORDER BY id LIMIT 200`, [], (err, rows) => {
+    db.all(`SELECT id, jenis, plate, harga_24, harga_12 FROM motors ORDER BY id LIMIT 200`, [], (err, rows) => {
       if (err) return reject(err);
       resolve(rows || []);
     });
@@ -579,4 +811,4 @@ function listPlates() {
 
 
 
-module.exports = { db,db_stok,db_admin, addQA, listQA, findBestMatch, updateQA, deleteQA, getQA, addSchedule, listSchedules, listAllSchedules, listSchedulesFull, getLatestScheduleByPlate, getLatestScheduleByMotorId, getMotorById, addMotor, listMotors, deleteMotor, clearData, deleteSchedule, deleteSchedulesByPickupDay, clearSchedules, listPlates, findAvailableMotorsWindow };
+module.exports = { db,db_stok,db_admin, addQA, listQA, findBestMatch, updateQA, deleteQA, getQA, addSchedule, listSchedules, listAllSchedules, listSchedulesFull, getLatestScheduleByPlate, getLatestScheduleByMotorId, getMotorById, addMotor, listMotors, updateMotor, deleteMotor, changeMotorId, clearData, deleteSchedule, deleteSchedulesByPickupDay, clearSchedules, listPlates, findAvailableMotorsWindow, findMotorsAvailability };

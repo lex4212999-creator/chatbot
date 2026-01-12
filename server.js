@@ -7,10 +7,11 @@ const cors = require('cors');
 const { Server } = require('socket.io');
 
 const { WhatsAppService } = require('./whatsapp');
-const { addQA, listQA, findBestMatch,db_stok,db_admin } = require('./db');
+const { addQA, listQA, db_stok, db_admin } = require('./db');
 const db = require('./db');
 
 const { bestAnswer, parseAvailabilityRequest, parseBookingRequest } = require('./nlp');
+const nlpRunner = require('./nlp-runner');
 
 const multer = require('multer');
 const xlsx = require('xlsx');
@@ -56,6 +57,7 @@ app.post('/api/upload-excel', upload.single('file'), async (req, res) => {
 });
 
 const client = new WhatsAppService(SESSION_PATH);
+const { MessageMedia } = require('whatsapp-web.js');
 
 // Push QR & status ke frontend
 client.on('qr', (qr) => {
@@ -69,6 +71,35 @@ client.on('status', (status) => {
 client.onMessage(async (msg) => {
   const text = (msg.body || '').trim();
   const from = msg.from;
+
+  // helper: resolve motor input (id, plate, or jenis). returns {found} or {ambiguous: [...] } or null
+  const resolveMotor = async (motorVal) => {
+    if (!motorVal) return null;
+    const asId = parseInt(String(motorVal).trim(), 10);
+    if (!isNaN(asId)) {
+      const byId = (db.getMotorById) ? await db.getMotorById(asId).catch(() => null) : null;
+      if (byId) return { found: byId };
+    }
+    if (!db.listMotors) return null;
+    const motors = await db.listMotors().catch(() => []);
+    const val = String(motorVal || '').toLowerCase().trim();
+    // exact plate match
+    let found = motors.find(m => (m.plate || '').toLowerCase() === val);
+    if (found) return { found };
+    // exact jenis match
+    found = motors.find(m => (m.jenis || '').toLowerCase() === val);
+    if (found) return { found };
+    // substring jenis match (e.g., user sends 'vario')
+    const candidates = motors.filter(m => {
+      const jenis = (m.jenis || '').toLowerCase();
+      return jenis.includes(val) || val.includes(jenis);
+    });
+    if (candidates.length >= 1) return { found: candidates[0] };
+    // plate contains
+    found = motors.find(m => (m.plate || '').toLowerCase().includes(val));
+    if (found) return { found };
+    return null;
+  };
 
   // admin login (do not require prior session)
   if (text.startsWith('/admin login')) {
@@ -108,6 +139,397 @@ client.onMessage(async (msg) => {
       }
     }
     // If reply is not 'yes', fall through to admin commands or QA.
+  }
+  
+
+  // Handle in-progress conversational flows (booking form & photo upload)
+  // Also detect an unsolicited filled form (multiline "Label: value") and
+  // start the photo-upload flow only when the user sends a valid form.
+  if (!(sessions[from] && sessions[from].flow)) {
+    const linesPreview = (text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (linesPreview.length >= 3) {
+      const data = {};
+      for (const line of linesPreview) {
+        const m = line.match(/^\s*([^:]+)\s*:\s*(.*)$/);
+        if (!m) continue;
+        const key = m[1].toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
+        const val = m[2].trim();
+        data[key] = val;
+      }
+      const mapKey = (k) => {
+        const kk = k.toLowerCase();
+        if (/motor id|jenis motor|jenis/i.test(kk)) return 'motor';
+        if (/mulai tgl|mulai tanggal|mulai tgl sewa|mulai tgl/i.test(kk)) return 'tgl_antar';
+        if (/mulai jam|mulai jam sewa|mulai jam/i.test(kk)) return 'jam_antar';
+        if (/antar dimana|antar di|antar lokasi|antar/i.test(kk)) return 'lokasi_antar';
+        if (/selesai tgl|selesai tanggal|selesai tgl sewa|tgl selesai/i.test(kk)) return 'tgl_ambil';
+        if (/selesai jam|selesai jam sewa|jam selesai/i.test(kk)) return 'jam_ambil';
+        if (/ambil motor di|ambil di|lokasi ambil|ambil/i.test(kk)) return 'lokasi_ambil';
+        if (/motor mau dipaki|motor mau dipakai|dipakai kemana|tujuan/i.test(kk)) return 'usage_place';
+        if (/instagram|ig/i.test(kk)) return 'instagram';
+        if (/nama lengkap|nama ktp|nama/i.test(kk)) return 'name';
+        if (/ktp kota|kota ktp|ktp kota mana/i.test(kk)) return 'ktp_city';
+        if (/no wa kedua|wa kedua|wa 2|no wa 2/i.test(kk)) return 'wa_2';
+        if (/no wa|wa|no hp|handphone/i.test(kk)) return 'wa_1';
+        if (/domisili|alamat/i.test(kk)) return 'domicile';
+        return null;
+      };
+      const form = {};
+      for (const k of Object.keys(data)) {
+        const fk = mapKey(k);
+        if (fk) form[fk] = data[k];
+      }
+      // perform validation similar to the explicit form flow
+      const required = ['motor','tgl_antar','jam_antar','tgl_ambil','jam_ambil','name','wa_1'];
+      const missing = required.filter(r => !form[r]);
+      if (missing.length) {
+        // enter interactive missing-field collection flow instead of aborting
+        if (!sessions[from]) sessions[from] = {};
+        sessions[from].flow = 'waiting_missing';
+        sessions[from].missing = missing.slice();
+        sessions[from].partialForm = form;
+        await client.sendMessage(from, `Ada field yang belum terisi: ${missing.join(', ')}. Silakan kirim nilai untuk field tersebut satu-per-baris sebagai 'Label: nilai' atau kirim semua sekaligus. Ketik 'cancel' untuk membatalkan.`);
+        return;
+      }
+      // resolve motor by id, plate, or jenis (support 'vario' etc.)
+      const motorVal = form['motor'];
+      const resolved = await resolveMotor(motorVal);
+      if (!resolved) return client.sendMessage(from, `Motor '${motorVal}' tidak ditemukan. Gunakan ID, jenis (mis. vario) atau plate yang muncul di daftar.`);
+      const motorObj = resolved.found;
+      // date/time validation
+      const isValidDate = (d) => /^(?:\d{1,2}\/\d{1,2}|\d{1,2})$/.test(d);
+      const isValidTime = (t) => /^\d{1,2}[:.]\d{2}$/.test(t);
+      if (!isValidDate(form.tgl_antar) || !isValidDate(form.tgl_ambil)) return client.sendMessage(from, 'Format hari tidak valid (gunakan D atau DD/MM).');
+      if (!isValidTime(form.jam_antar) || !isValidTime(form.jam_ambil)) return client.sendMessage(from, 'Format jam tidak valid (gunakan HH:MM).');
+
+      // all good: start photo flow
+      if (!sessions[from]) sessions[from] = {};
+      sessions[from].form = {
+        motorId: motorObj.id || null,
+        jenis: motorObj.jenis || '',
+        plate: motorObj.plate || '',
+        delivery_day: form.tgl_antar,
+        delivery_time: form.jam_antar,
+        pickup_day: form.tgl_ambil,
+        pickup_time: form.jam_ambil,
+        pickup: form.lokasi_antar || form.lokasi_ambil || '',
+        dropoff: form.lokasi_ambil || form.lokasi_antar || '',
+        usage_place: form.usage_place || '',
+        instagram: form.instagram || '',
+        customer: form.name,
+        ktp_city: form.ktp_city || '',
+        domicile: form.domicile || '',
+        WA_1: form.wa_1 || '',
+        WA_2: form.wa_2 || ''
+      };
+      sessions[from].flow = 'waiting_photos';
+      sessions[from].photos = [];
+      await client.sendMessage(from, 'Data diterima dan valid. Silakan fotokan KTP dan jaminan (NPWP/KK/kartu nama). Kirim foto sekarang.');
+      return;
+    }
+  }
+
+  if (sessions[from] && sessions[from].flow) {
+    const flow = sessions[from].flow;
+    // interactive collection of missing fields
+    if (flow === 'waiting_missing') {
+      const textLower = (text || '').trim().toLowerCase();
+      if (textLower === 'cancel') {
+        delete sessions[from].flow; delete sessions[from].missing; delete sessions[from].partialForm;
+        return client.sendMessage(from, 'Pengisian form dibatalkan. Jika ingin mulai ulang, kirim form lengkap lagi.');
+      }
+      const lines = (text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+      const data = {};
+      for (const line of lines) {
+        const m = line.match(/^\s*([^:]+)\s*:\s*(.*)$/);
+        if (!m) continue;
+        const key = m[1].toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
+        const val = m[2].trim();
+        data[key] = val;
+      }
+      const mapKey = (k) => {
+        const kk = k.toLowerCase();
+        if (/motor id|jenis motor|jenis/i.test(kk)) return 'motor';
+        if (/mulai tgl|mulai tanggal|mulai tgl sewa|mulai tgl/i.test(kk)) return 'tgl_antar';
+        if (/mulai jam|mulai jam sewa|mulai jam/i.test(kk)) return 'jam_antar';
+        if (/antar dimana|antar di|antar lokasi|antar/i.test(kk)) return 'lokasi_antar';
+        if (/selesai tgl|selesai tanggal|selesai tgl sewa|tgl selesai/i.test(kk)) return 'tgl_ambil';
+        if (/selesai jam|selesai jam sewa|jam selesai/i.test(kk)) return 'jam_ambil';
+        if (/ambil motor di|ambil di|lokasi ambil|ambil/i.test(kk)) return 'lokasi_ambil';
+        if (/motor mau dipaki|motor mau dipakai|dipakai kemana|tujuan/i.test(kk)) return 'usage_place';
+        if (/instagram|ig/i.test(kk)) return 'instagram';
+        if (/nama lengkap|nama ktp|nama/i.test(kk)) return 'name';
+        if (/ktp kota|kota ktp|ktp kota mana/i.test(kk)) return 'ktp_city';
+        if (/no wa kedua|wa kedua|wa 2|no wa 2/i.test(kk)) return 'wa_2';
+        if (/no wa|wa|no hp|handphone/i.test(kk)) return 'wa_1';
+        if (/domisili|alamat/i.test(kk)) return 'domicile';
+        return null;
+      };
+      const partial = sessions[from].partialForm || {};
+      for (const k of Object.keys(data)) {
+        const fk = mapKey(k);
+        if (fk) partial[fk] = data[k];
+      }
+      sessions[from].partialForm = partial;
+      sessions[from].missing = (sessions[from].missing || []).filter(mf => !!mf && !partial[mf]);
+      if (sessions[from].missing.length) {
+        return client.sendMessage(from, `Masih kurang: ${sessions[from].missing.join(', ')}. Silakan lanjut kirim nilai-nilainya.`);
+      }
+      // finalize and continue to photo flow
+      try {
+        const form = sessions[from].partialForm || {};
+        const motorVal = form['motor'];
+        const resolved = await resolveMotor(motorVal);
+        if (!resolved) return client.sendMessage(from, `Motor '${motorVal}' tidak ditemukan. Gunakan ID, jenis (mis. vario) atau plate yang muncul di daftar.`);
+        const motorObj = resolved.found;
+        const isValidDate = (d) => /^(?:\d{1,2}\/\d{1,2}|\d{1,2})$/.test(d);
+        const isValidTime = (t) => /^\d{1,2}[:.]\d{2}$/.test(t);
+        if (!isValidDate(form.tgl_antar) || !isValidDate(form.tgl_ambil)) return client.sendMessage(from, 'Format hari tidak valid (gunakan D atau DD/MM).');
+        if (!isValidTime(form.jam_antar) || !isValidTime(form.jam_ambil)) return client.sendMessage(from, 'Format jam tidak valid (gunakan HH:MM).');
+        sessions[from].form = {
+          motorId: motorObj.id || null,
+          jenis: motorObj.jenis || '',
+          plate: motorObj.plate || '',
+          delivery_day: form.tgl_antar,
+          delivery_time: form.jam_antar,
+          pickup_day: form.tgl_ambil,
+          pickup_time: form.jam_ambil,
+          pickup: form.lokasi_antar || form.lokasi_ambil || '',
+          dropoff: form.lokasi_ambil || form.lokasi_antar || '',
+          usage_place: form.usage_place || '',
+          instagram: form.instagram || '',
+          customer: form.name,
+          ktp_city: form.ktp_city || '',
+          domicile: form.domicile || '',
+          WA_1: form.wa_1 || '',
+          WA_2: form.wa_2 || ''
+        };
+        sessions[from].flow = 'waiting_photos';
+        sessions[from].photos = [];
+        delete sessions[from].missing; delete sessions[from].partialForm;
+        await client.sendMessage(from, 'Data lengkap. Silakan fotokan KTP dan jaminan (NPWP/KK/kartu nama). Kirim foto sekarang.');
+        return;
+      } catch (err) {
+        console.error('Finalize missing-fields error', err);
+        return client.sendMessage(from, 'Gagal memproses data tambahan: ' + (err && err.message));
+      }
+    }
+    // expecting pipe-separated form from user
+    if (flow === 'waiting_form') {
+      // parse multiline labeled form
+      const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+      const data = {};
+      for (const line of lines) {
+        const m = line.match(/^\s*([^:]+)\s*:\s*(.*)$/);
+        if (!m) continue;
+        const key = m[1].toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
+        const val = m[2].trim();
+        data[key] = val;
+      }
+      const mapKey = (k) => {
+        const kk = k.toLowerCase();
+        if (/motor id|jenis motor|jenis/i.test(kk)) return 'motor';
+        if (/mulai tgl|mulai tanggal|mulai tgl sewa|mulai tgl/i.test(kk)) return 'tgl_antar';
+        if (/mulai jam|mulai jam sewa|mulai jam/i.test(kk)) return 'jam_antar';
+        if (/antar dimana|antar di|antar lokasi|antar/i.test(kk)) return 'lokasi_antar';
+        if (/selesai tgl|selesai tanggal|selesai tgl sewa|tgl selesai/i.test(kk)) return 'tgl_ambil';
+        if (/selesai jam|selesai jam sewa|jam selesai/i.test(kk)) return 'jam_ambil';
+        if (/ambil motor di|ambil di|lokasi ambil|ambil/i.test(kk)) return 'lokasi_ambil';
+        if (/motor mau dipaki|motor mau dipakai|dipakai kemana|tujuan/i.test(kk)) return 'usage_place';
+        if (/instagram|ig/i.test(kk)) return 'instagram';
+        if (/nama lengkap|nama ktp|nama/i.test(kk)) return 'name';
+        if (/ktp kota|kota ktp|ktp kota mana/i.test(kk)) return 'ktp_city';
+        if (/no wa kedua|wa kedua|wa 2|no wa 2/i.test(kk)) return 'wa_2';
+        if (/no wa|wa|no hp|handphone/i.test(kk)) return 'wa_1';
+        if (/domisili|alamat/i.test(kk)) return 'domicile';
+        return null;
+      };
+      const form = {};
+      for (const k of Object.keys(data)) {
+        const fk = mapKey(k);
+        if (fk) form[fk] = data[k];
+      }
+      // require core fields (at least motor, dates/times, name, wa)
+      const required = ['motor','tgl_antar','jam_antar','tgl_ambil','jam_ambil','name','wa_1'];
+      for (const r of required) {
+        if (!form[r]) return client.sendMessage(from, `Field '${r}' belum terisi atau label salah. Pastikan mengikuti template form.`);
+      }
+      // resolve motor input (id, plate, or jenis)
+      const motorVal = form['motor'];
+      const resolved = await resolveMotor(motorVal);
+      if (!resolved) return client.sendMessage(from, `Motor '${motorVal}' tidak ditemukan. Gunakan ID, jenis (mis. vario) atau plate yang muncul di daftar.`);
+      const motorObj = resolved.found;
+      // validate dates and times
+      const isValidDate = (d) => /^(?:\d{1,2}\/\d{1,2}|\d{1,2})$/.test(d);
+      const isValidTime = (t) => /^\d{1,2}[:.]\d{2}$/.test(t);
+      if (!isValidDate(form.tgl_antar) || !isValidDate(form.tgl_ambil)) return client.sendMessage(from, 'Format hari tidak valid (gunakan D atau DD/MM).');
+      if (!isValidTime(form.jam_antar) || !isValidTime(form.jam_ambil)) return client.sendMessage(from, 'Format jam tidak valid (gunakan HH:MM).');
+      if (!form.name) return client.sendMessage(from, 'Nama tidak boleh kosong.');
+      if (!form.domicile) return client.sendMessage(from, 'Domisili tidak boleh kosong.');
+      // store normalized form
+      sessions[from].form = {
+        motorId: motorObj.id || null,
+        jenis: motorObj.jenis || '',
+        plate: motorObj.plate || '',
+        delivery_day: form.tgl_antar,
+        delivery_time: form.jam_antar,
+        pickup_day: form.tgl_ambil,
+        pickup_time: form.jam_ambil,
+        pickup: form.lokasi_antar || form.lokasi_ambil || '',
+        dropoff: form.lokasi_ambil || form.lokasi_antar || '',
+        usage_place: form.usage_place || '',
+        instagram: form.instagram || '',
+        customer: form.name,
+        ktp_city: form.ktp_city || '',
+        domicile: form.domicile || '',
+        WA_1: form.wa_1 || '',
+        WA_2: form.wa_2 || ''
+      };
+      sessions[from].flow = 'waiting_photos';
+      sessions[from].photos = [];
+      await client.sendMessage(from, 'Data diterima dan valid. Silakan fotokan KTP dan jaminan (NPWP/KK/kartu nama). Kirim foto sekarang.');
+      return;
+    }
+    // expecting image(s)
+    if (flow === 'waiting_photos') {
+      const isImage = (msg && ((msg.mimetype && msg.mimetype.startsWith('image')) || msg.type === 'image' || msg.isMedia));
+      if (!isImage) {
+        return client.sendMessage(from, "Tolong kirim foto KTP dan jaminan (NPWP/KK/kartu nama). Jika sudah mengirim, tunggu sejenak.");
+      }
+      let savedPath = null;
+      try {
+        // prefer msg.downloadMedia() on the incoming message object
+        if (msg && typeof msg.downloadMedia === 'function') {
+          const media = await msg.downloadMedia();
+          if (media && media.data) {
+            const ext = (media.mimetype && media.mimetype.split('/')[1]) || 'jpg';
+            const filename = `${Date.now()}_${from.replace(/\D/g, '')}.${ext}`;
+            const full = path.join(__dirname, 'data', 'uploads', filename);
+            fs.writeFileSync(full, media.data, 'base64');
+            savedPath = full;
+          } else {
+            savedPath = 'received_media_empty';
+          }
+        } else if (msg && (msg.mimetype || msg.isMedia)) {
+          // fallback: some message objects expose mimetype/data directly
+          try {
+            const data = msg.data || msg._data || null;
+            const ext = (msg.mimetype && msg.mimetype.split('/')[1]) || 'jpg';
+            const filename = `${Date.now()}_${from.replace(/\D/g, '')}.${ext}`;
+            const full = path.join(__dirname, 'data', 'uploads', filename);
+            if (data) fs.writeFileSync(full, data, 'base64');
+            savedPath = full;
+          } catch (e) {
+            savedPath = 'received_media_unknown';
+          }
+        } else {
+          savedPath = 'received_media_unknown';
+        }
+      } catch (err) {
+        console.error('Saving media error', err);
+        savedPath = 'error_saving_media';
+      }
+      sessions[from].photos.push(savedPath);
+      // persist form to schedules table (store WA_1/WA_2 if provided)
+      try {
+        const item = {
+          vehicle_type: sessions[from].form.jenis || '',
+          motor_id: sessions[from].form.motorId || null,
+          plate: sessions[from].form.plate || '',
+          delivery_day: sessions[from].form.delivery_day || '',
+          delivery_time: sessions[from].form.delivery_time || '',
+          pickup_day: sessions[from].form.pickup_day || '',
+          pickup_time: sessions[from].form.pickup_time || '',
+          pickup: sessions[from].form.pickup || '',
+          dropoff: sessions[from].form.dropoff || '',
+          customer: sessions[from].form.customer || '',
+          total_price: sessions[from].form.total_price || '',
+          entry_text: '',
+          WA_1: sessions[from].form.WA_1 || '',
+          WA_2: sessions[from].form.WA_2 || ''
+        };
+        // compute daily form number (1..150) based on today's created rows
+        let todayCount = 0;
+        try {
+          todayCount = await new Promise((res) => db.db.get("SELECT COUNT(*) as c FROM schedules WHERE DATE(created_at) = DATE('now','localtime')", [], (err, row) => { if (err) return res(0); return res(row && row.c ? row.c : 0); }));
+        } catch (e) { todayCount = 0; }
+        const nextNoForm = (Number(todayCount) % 150) + 1;
+        item.no_form = String(nextNoForm);
+        item.client_jid = from;
+        // persist no_form into session form for admin message
+        sessions[from].form.no_form = item.no_form;
+        await db.addSchedule(item).catch(() => null);
+      } catch (err) {
+        console.error('Saving schedule from user form failed', err);
+      }
+      await client.sendMessage(from, 'Terima kasih, foto diterima.');
+      io.emit('admin_review', { from, form: sessions[from].form, photos: sessions[from].photos });
+      // forward form + photos to all admin users from admin table
+      try {
+        const envAdminRaw = process.env.ADMIN_NUMBER || process.env.ADMIN || null;
+        const phoneRaw = String(from || '').split('@')[0];
+        const noid = phoneRaw.replace(/[^0-9]/g, '');
+        const form = sessions[from].form || {};
+        const msgLines = [];
+        msgLines.push('Verifikasi booking baru:');
+        msgLines.push(`No Form: ${sessions[from].form.no_form || ''}`);
+        msgLines.push(`Nama: ${form.customer || ''}`);
+        msgLines.push(`No WA (pengirim): ${noid}`);
+        msgLines.push(`WA_1 (input): ${sessions[from].form.WA_1 || ''}`);
+        msgLines.push(`WA_2 (input): ${sessions[from].form.WA_2 || ''}`);
+        msgLines.push(`Jenis motor: ${form.jenis || ''}`);
+        msgLines.push(`jam antar: ${form.delivery_time || ''}`);
+        msgLines.push(`tgl antar: ${form.delivery_day || ''}`);
+        msgLines.push(`lokasi antar: ${form.pickup || ''}`);
+        msgLines.push(`jam ambil: ${form.pickup_time || ''}`);
+        msgLines.push(`tgl ambil: ${form.pickup_day || ''}`);
+        msgLines.push(`lok ambil: ${form.dropoff || ''}`);
+        msgLines.push('Ketik /admin nota <no_form> untuk membuat nota dan mengirimkannya ke customer.');
+
+        const sendTo = async (uRaw) => {
+          if (!uRaw) return;
+          let u = String(uRaw).trim();
+          // normalize numeric env var to WhatsApp id
+          if (!u.includes('@')) {
+            const digits = u.replace(/[^0-9]/g, '');
+            if (!digits) return;
+            u = `${digits}@c.us`;
+          }
+          try {
+            await client.client.sendMessage(u, msgLines.join('\n'));
+            for (const p of sessions[from].photos || []) {
+              try {
+                if (!p || typeof p !== 'string') continue;
+                const fs = require('fs');
+                if (!fs.existsSync(p)) continue;
+                const media = MessageMedia.fromFilePath(p);
+                await client.client.sendMessage(u, media);
+              } catch (e) {
+                console.error('Send photo to admin error', e && e.message);
+              }
+            }
+          } catch (e) {
+            console.error('Forward to admin failed for', u, e && e.message);
+          }
+        };
+
+        if (envAdminRaw) {
+          await sendTo(envAdminRaw);
+        } else {
+          // fallback to admin table
+          db_admin.all(`SELECT user FROM admin`, [], async (err, admins) => {
+            if (err || !admins || !admins.length) return;
+            for (const a of admins) {
+              await sendTo(a && a.user);
+            }
+          });
+        }
+      } catch (e) {
+        console.error('Error forwarding to admins', e && e.message);
+      }
+      sessions[from].flow = 'submitted';
+      return;
+    }
   }
 
   // If message is an admin command group, require session
@@ -228,7 +650,7 @@ client.onMessage(async (msg) => {
       return;
     }
 
-    if (text.startsWith('/admin update ')) {
+    if (text.startsWith('/admin update ') && !text.startsWith('/admin update motor')) {
       const parts = text.split('|').map(p => p.trim());
       const idPart = (parts[0] || '').replace('/admin update ', '').trim();
       const newPass = parts[1] || '';
@@ -255,6 +677,53 @@ client.onMessage(async (msg) => {
       } catch (err) {
         console.error('Delete jadwal kemarin error', err);
         return client.sendMessage(from, 'Gagal menghapus jadwal kemarin: ' + (err.message || err));
+      }
+    }
+
+    // Delete schedules yesterday and earlier: '/admin delete jadwal -1'
+    if (text.startsWith('/admin delete jadwal -1')) {
+      try {
+        const now = new Date();
+        const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+        const cutoff = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate(), 23, 59, 59, 999);
+
+        const ddmmToDate = (ddmm, bulanHint) => {
+          if (!ddmm) return null;
+          const s = String(ddmm).trim();
+          let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+          if (m) return new Date(parseInt(m[1],10), parseInt(m[2],10)-1, parseInt(m[3],10));
+          m = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+          if (m) { const day = parseInt(m[1],10); const month = parseInt(m[2],10); const year = m[3] ? (m[3].length===2?2000+parseInt(m[3],10):parseInt(m[3],10)) : (new Date()).getFullYear(); return new Date(year, month-1, day); }
+          m = s.match(/^(\d{1,2})$/);
+          if (m) { const day = parseInt(m[1],10); let month = (new Date()).getMonth()+1; let year = (new Date()).getFullYear(); if (bulanHint) { const bhm = String(bulanHint).match(/^(\d{1,2})(?:\/(\d{2,4}))?$/); if (bhm) { month = parseInt(bhm[1],10); if (bhm[2]) year = bhm[2].length===2?2000+parseInt(bhm[2],10):parseInt(bhm[2],10); } } return new Date(year, month-1, day); }
+          return null;
+        };
+
+        const rows = await db.listAllSchedules ? await db.listAllSchedules() : await db.listSchedules();
+        const toDelete = [];
+        for (const r of rows) {
+          const pdRaw = r.pickup_day || r.start_date || null;
+          if (!pdRaw) continue;
+          const pd = ddmmToDate(pdRaw, r.bulan);
+          if (!pd) continue;
+          // compare date (end of day)
+          const pdEnd = new Date(pd.getFullYear(), pd.getMonth(), pd.getDate(), 23,59,59,999);
+          if (pdEnd.getTime() <= cutoff.getTime()) {
+            toDelete.push(r.id);
+          }
+        }
+        if (!toDelete.length) return client.sendMessage(from, 'Tidak ada jadwal dengan pickup_day <= kemarin.');
+        let totalDeleted = 0;
+        for (const id of toDelete) {
+          try {
+            const resDel = await db.deleteSchedule(id);
+            if (resDel && resDel.changes) totalDeleted += resDel.changes;
+          } catch (e) { /* ignore single errors */ }
+        }
+        return client.sendMessage(from, `Berhasil menghapus ${totalDeleted} jadwal dengan pickup_day <= kemarin.`);
+      } catch (err) {
+        console.error('Delete jadwal -1 error', err);
+        return client.sendMessage(from, 'Gagal menghapus jadwal -1: ' + (err && err.message));
       }
     }
 
@@ -597,11 +1066,45 @@ client.onMessage(async (msg) => {
       }
     }
 
+    if (text.startsWith('/admin update motor')) {
+      const rest = text.replace('/admin update motor', '').split('|').map(s => s.trim()).filter(Boolean);
+      const id = rest[0] || '';
+      const jenis = rest[1] || '';
+      const plate = rest[2] || '';
+      const harga_24 = rest[3] || '';
+      const harga_12 = rest[4] || '';
+      if (!id) return client.sendMessage(from, 'Format: /admin update motor | id | jenis | plate | harga_24 | harga_12');
+      try {
+        const result = await db.updateMotor ? await db.updateMotor(id, jenis, plate, harga_24, harga_12) : await require('./db').updateMotor(id, jenis, plate, harga_24, harga_12);
+        if (result.changes === 0) return client.sendMessage(from, 'Motor tidak ditemukan atau tidak ada perubahan.');
+        const row = await db.getMotorById(id).catch(() => null);
+        return client.sendMessage(from, `Motor ID ${id} berhasil diupdate.\n${row ? `Jenis: ${row.jenis} | Plate: ${row.plate} | 24h: ${row.harga_24||''} | 12h: ${row.harga_12||''}` : ''}`);
+      } catch (err) {
+        console.error('Update motor error', err);
+        return client.sendMessage(from, 'Gagal update motor: ' + (err.message || err));
+      }
+    }
+
+    // Admin: edit motor id (change primary key). Format: /admin edit motor | oldId | newId
+    if (text.startsWith('/admin edit motor')) {
+      const rest = text.replace('/admin edit motor', '').split('|').map(s => s.trim()).filter(Boolean);
+      const oldId = rest[0] || '';
+      const newId = rest[1] || '';
+      if (!oldId || !newId) return client.sendMessage(from, 'Format: /admin edit motor | oldId | newId');
+      try {
+        const result = await db.changeMotorId ? await db.changeMotorId(oldId, newId) : await require('./db').changeMotorId(oldId, newId);
+        return client.sendMessage(from, `Motor ID ${oldId} berhasil diubah menjadi ${newId}.`);
+      } catch (err) {
+        console.error('Edit motor id error', err);
+        return client.sendMessage(from, 'Gagal edit motor id: ' + (err && err.message || err));
+      }
+    }
+
     if (text.startsWith('/admin list motors')) {
       try {
         const rows = await db.listMotors();
         if (!rows.length) return client.sendMessage(from, 'Belum ada motor.');
-        const reply = rows.map(r => `${r.id}. ${r.jenis} | ${r.plate}`).join('\n');
+        const reply = rows.map(r => `${r.id}. ${r.jenis} | ${r.plate} | 24h: ${r.harga_24 || '-'} | 12h: ${r.harga_12 || '-'}`).join('\n');
         return client.sendMessage(from, `Daftar motor:\n${reply}`);
       } catch (err) {
         console.error('List motors error', err);
@@ -707,6 +1210,80 @@ client.onMessage(async (msg) => {
       }
     }
 
+    // Admin: generate invoice/nota for a schedule: /admin nota <scheduleId>
+    if (text.startsWith('/admin nota')) {
+      const rest = text.replace('/admin nota', '').trim();
+      const id = rest.split('|').map(s=>s.trim()).filter(Boolean)[0] || rest;
+      if (!id) return client.sendMessage(from, 'Format: /admin nota | <scheduleId>');
+      try {
+        const rows = await db.listAllSchedules();
+        const schedule = (rows || []).find(r => String(r.id) === String(id) || String(r.no_form) === String(id));
+        if (!schedule) return client.sendMessage(from, `Jadwal ID ${id} tidak ditemukan.`);
+
+        const ddmmToDate = (ddmm, bulanHint) => {
+          if (!ddmm) return null;
+          const s = String(ddmm).trim();
+          let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+          if (m) return new Date(parseInt(m[1],10), parseInt(m[2],10)-1, parseInt(m[3],10));
+          m = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+          if (m) { const day = parseInt(m[1],10); const month = parseInt(m[2],10); const year = m[3] ? (m[3].length===2?2000+parseInt(m[3],10):parseInt(m[3],10)) : (new Date()).getFullYear(); return new Date(year, month-1, day); }
+          m = s.match(/^(\d{1,2})$/);
+          if (m) { const day = parseInt(m[1],10); const now = new Date(); let month = now.getMonth()+1; let year = now.getFullYear(); if (bulanHint) { const bhm = String(bulanHint).match(/^(\d{1,2})(?:\/(\d{2,4}))?$/); if (bhm) { month = parseInt(bhm[1],10); if (bhm[2]) year = bhm[2].length===2?2000+parseInt(bhm[2],10):parseInt(bhm[2],10); } } return new Date(year, month-1, day); }
+          return null;
+        };
+        const timeToMinutes = (t) => { if (!t) return null; const mm = String(t).match(/(\d{1,2})[:\. ]?(\d{2})?/); if (!mm) return null; const hh = parseInt(mm[1],10); const mn = mm[2]?parseInt(mm[2],10):0; return hh*60+mn; };
+
+        const startDate = (schedule.delivery_day && schedule.delivery_time) ? (() => { const d = ddmmToDate(schedule.delivery_day, schedule.bulan); const m = timeToMinutes(schedule.delivery_time); if (!d || m==null) return null; const dt = new Date(d.getTime()); dt.setHours(0,0,0,0); dt.setMinutes(m); return dt; })() : null;
+        const endDate = (schedule.pickup_day && schedule.pickup_time) ? (() => { const d = ddmmToDate(schedule.pickup_day, schedule.bulan); const m = timeToMinutes(schedule.pickup_time); if (!d || m==null) return null; const dt = new Date(d.getTime()); dt.setHours(0,0,0,0); dt.setMinutes(m); return dt; })() : null;
+        if (!startDate || !endDate) return client.sendMessage(from, 'Tidak dapat menentukan tanggal/jam antar atau ambil pada jadwal ini.');
+        const diffMs = endDate.getTime() - startDate.getTime();
+        if (diffMs <= 0) return client.sendMessage(from, 'Waktu ambil harus setelah waktu antar.');
+        const totalHours = Math.ceil(diffMs / (1000*3600));
+
+        // compute blocks: full 24h blocks, remaining (if >0) count as one 12h block
+        const full24 = Math.floor(totalHours / 24);
+        const rem = totalHours - full24*24;
+        const use12 = rem > 0 ? 1 : 0;
+
+        // get motor pricing
+        const motor = await db.getMotorById(schedule.motor_id || schedule.motorId || schedule.motor_id).catch(()=>null);
+        const raw24 = motor && motor.harga_24 ? String(motor.harga_24) : '';
+        const raw12 = motor && motor.harga_12 ? String(motor.harga_12) : '';
+        const parsePrice = (s) => { if (!s) return 0; const n = String(s).replace(/[^0-9]/g,''); return n ? parseInt(n,10) : 0; };
+        const harga24 = parsePrice(raw24);
+        const harga12 = parsePrice(raw12);
+        const ongkir = parseInt(process.env.DEFAULT_ONGKIR || '20000', 10) || 20000;
+
+        const subtotal = full24 * harga24 + use12 * harga12;
+        const total = subtotal + ongkir;
+
+        const lines = [];
+        lines.push(`Nota untuk jadwal ID ${schedule.id}:`);
+        lines.push(`Nama: ${schedule.customer || schedule.name || ''}`);
+        lines.push(`Motor: ${schedule.motor_jenis || schedule.vehicle_type || ''}`);
+        lines.push(`Dari: ${schedule.delivery_day || ''} ${schedule.delivery_time || ''}`);
+        lines.push(`Sampai: ${schedule.pickup_day || ''} ${schedule.pickup_time || ''}`);
+        lines.push(`Durasi (jam): ${totalHours}`);
+        lines.push(`Perhitungan: ${full24} x 24 jam @ ${harga24} = ${full24 * harga24}` + (use12 ? ` ; + 1 x 12 jam @ ${harga12} = ${harga12}` : ''));
+        lines.push(`Subtotal: ${subtotal}`);
+        lines.push(`Ongkir: ${ongkir}`);
+        lines.push(`TOTAL: ${total}`);
+        // send the nota to customer using stored client_jid (WhatsApp id) if available, else fallback to WA_1
+        const targetJid = schedule.client_jid || (schedule.WA_1 ? `${String(schedule.WA_1).replace(/[^0-9]/g,'')}@c.us` : null);
+        if (!targetJid) return client.sendMessage(from, 'Tidak ada nomor WA customer tersimpan pada jadwal ini.');
+        try {
+          await client.client.sendMessage(targetJid, lines.join('\n'));
+          return client.sendMessage(from, `Nota dikirim ke customer: ${targetJid}`);
+        } catch (e) {
+          console.error('Failed to send nota to customer', e && e.message);
+          return client.sendMessage(from, 'Gagal mengirim nota ke customer: ' + (e && e.message));
+        }
+      } catch (err) {
+        console.error('Admin nota error', err);
+        return client.sendMessage(from, 'Gagal menghasilkan nota: ' + (err && err.message));
+      }
+    }
+
     // Unknown /admin command
     return client.sendMessage(from, 'Perintah admin tidak dikenal.');
   }
@@ -716,17 +1293,100 @@ client.onMessage(async (msg) => {
     // Booking intent (e.g. "mau boking tgl 12/01" or "booking tanggal 2026-01-12 jam 10")
     const booking = parseBookingRequest(text);
     if (booking) {
+      await client.sendMessage(from, 'Saya cek dlu ya kak');
+
       const startMs = booking.start ? booking.start.getTime() : Date.now();
-      const hours = booking.hours || 24;
       try {
-        const availMotors = await db.findAvailableMotorsWindow(startMs, hours);
-        if (!availMotors || availMotors.length === 0) {
-          const end = new Date(startMs + hours * 3600 * 1000);
-          await client.sendMessage(from, `Tidak ada motor tersedia pada ${booking.start.toLocaleString()} sampai ${end.toLocaleString()}.`);
-        } else {
-          const lines = availMotors.map(m => `${m.id}. ${m.jenis || ''} | ${m.plate || ''}`);
-          await client.sendMessage(from, `Motor tersedia untuk ${booking.start.toLocaleString()} (${availMotors.length}):\n` + lines.join('\n'));
+        const rows = await db.listAllSchedules();
+        const motors = await db.listMotors();
+
+        const ddmmToDate = (ddmm, bulanHint) => {
+          if (!ddmm) return null;
+          const s = String(ddmm).trim();
+          let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+          if (m) return new Date(parseInt(m[1],10), parseInt(m[2],10)-1, parseInt(m[3],10));
+          m = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+          if (m) { const day = parseInt(m[1],10); const month = parseInt(m[2],10); const year = m[3] ? (m[3].length===2?2000+parseInt(m[3],10):parseInt(m[3],10)) : (new Date()).getFullYear(); return new Date(year, month-1, day); }
+          m = s.match(/^(\d{1,2})$/);
+          if (m) { const day = parseInt(m[1],10); const now = new Date(); let month = now.getMonth()+1; let year = now.getFullYear(); if (bulanHint) { const bhm = String(bulanHint).match(/^(\d{1,2})(?:\/(\d{2,4}))?$/); if (bhm) { month = parseInt(bhm[1],10); if (bhm[2]) year = bhm[2].length===2?2000+parseInt(bhm[2],10):parseInt(bhm[2],10); } } return new Date(year, month-1, day); }
+          return null;
+        };
+        const timeToMinutes = (t) => { if (!t) return null; const mm = String(t).match(/(\d{1,2})[:\.]?(\d{2})?/); if (!mm) return null; const hh = parseInt(mm[1],10); const mn = mm[2]?parseInt(mm[2],10):0; return hh*60+mn; };
+
+        const scheduleStartDate = (r) => {
+          if (r.pickup_day && r.pickup_time) { const pd = ddmmToDate(r.pickup_day, r.bulan); const pm = timeToMinutes(r.pickup_time); if (pd && pm != null) { const d = new Date(pd.getTime()); d.setHours(0,0,0,0); d.setMinutes(pm); return d; } }
+          if (r.start_date && r.start_time) { const sd = ddmmToDate(r.start_date, r.bulan); const sm = timeToMinutes(r.start_time); if (sd && sm != null) { const d = new Date(sd.getTime()); d.setHours(0,0,0,0); d.setMinutes(sm); return d; } }
+          if (r.delivery_day && r.delivery_time) { const dd = ddmmToDate(r.delivery_day, r.bulan); const dm = timeToMinutes(r.delivery_time); if (dd && dm != null) { const d = new Date(dd.getTime()); d.setHours(0,0,0,0); d.setMinutes(dm); return d; } }
+          if (r.end_date && r.end_time) { const ed = ddmmToDate(r.end_date, r.bulan); const em = timeToMinutes(r.end_time); if (ed && em != null) { const d = new Date(ed.getTime()); d.setHours(0,0,0,0); d.setMinutes(em); return d; } }
+          return null;
+        };
+
+        const today = new Date(startMs);
+        const todayDay = today.getDate(); const todayMonth = today.getMonth(); const todayYear = today.getFullYear();
+
+        const bookedMotorIds = new Set();
+        const bookedByJenis = {};
+        const bookedEarliestPickupByJenis = {};
+        const schedulePickupDate = (r) => {
+          if (r.pickup_day && r.pickup_time) { const pd = ddmmToDate(r.pickup_day, r.bulan); const pm = timeToMinutes(r.pickup_time); if (pd && pm != null) { const d = new Date(pd.getTime()); d.setHours(0,0,0,0); d.setMinutes(pm); return d; } }
+          if (r.start_date && r.start_time) { const sd = ddmmToDate(r.start_date, r.bulan); const sm = timeToMinutes(r.start_time); if (sd && sm != null) { const d = new Date(sd.getTime()); d.setHours(0,0,0,0); d.setMinutes(sm); return d; } }
+          if (r.delivery_day && r.delivery_time) { const dd = ddmmToDate(r.delivery_day, r.bulan); const dm = timeToMinutes(r.delivery_time); if (dd && dm != null) { const d = new Date(dd.getTime()); d.setHours(0,0,0,0); d.setMinutes(dm); return d; } }
+          if (r.end_date && r.end_time) { const ed = ddmmToDate(r.end_date, r.bulan); const em = timeToMinutes(r.end_time); if (ed && em != null) { const d = new Date(ed.getTime()); d.setHours(0,0,0,0); d.setMinutes(em); return d; } }
+          return null;
+        };
+        for (const r of rows) {
+          const sd = scheduleStartDate(r); if (!sd) continue;
+          if (sd.getDate() === todayDay && sd.getMonth() === todayMonth && sd.getFullYear() === todayYear) {
+            if (r.motor_id) bookedMotorIds.add(String(r.motor_id));
+            const jenis = (r.motor_jenis || r.vehicle_type || 'Lainnya').toString();
+            bookedByJenis[jenis] = (bookedByJenis[jenis] || 0) + 1;
+            const pickupDt = schedulePickupDate(r);
+            if (pickupDt) {
+              const cur = bookedEarliestPickupByJenis[jenis];
+              if (!cur || pickupDt.getTime() < cur.getTime()) bookedEarliestPickupByJenis[jenis] = pickupDt;
+            }
+          }
         }
+
+        const totalByJenis = {};
+        const motorMap = {};
+        for (const m of motors) { motorMap[String(m.id)] = m; totalByJenis[m.jenis || 'Lainnya'] = (totalByJenis[m.jenis || 'Lainnya'] || 0) + 1; }
+
+        const availableMotorIds = [];
+        for (const m of motors) { if (!bookedMotorIds.has(String(m.id))) availableMotorIds.push(m.id); }
+
+        const availableByJenis = {};
+        for (const id of availableMotorIds) { const m = motorMap[String(id)]; if (!m) continue; availableByJenis[m.jenis || 'Lainnya'] = (availableByJenis[m.jenis || 'Lainnya'] || 0) + 1; }
+
+        // const parts = [];
+        // parts.push('Daftar motor tersedia hari ini:');
+        // const formatHM = (d) => { if (!d) return null; const hh = String(d.getHours()).padStart(2,'0'); const mm = String(d.getMinutes()).padStart(2,'0'); return `${hh}:${mm}`; };
+        // for (const k of Object.keys(totalByJenis).sort()) {
+        //   const avail = availableByJenis[k] || 0; const booked = bookedByJenis[k] || (totalByJenis[k] - avail);
+        //   const earliest = bookedEarliestPickupByJenis[k] || null;
+        //   if (earliest) {
+        //     const ready = new Date(earliest.getTime() + 30*60000);
+        //     parts.push(`${k}: ${avail} tersedia (${booked} diboking paling cepat ambil ${formatHM(earliest)} (ready ${formatHM(ready)}))`);
+        //   } else {
+        //     parts.push(`${k}: ${avail} tersedia (${booked} diboking)`);
+        //   }
+        // }
+
+        // await client.sendMessage(from, parts.join('\n'));
+
+        // send greeting + harga list only; do NOT prompt form or set flow here
+        try {
+          const priceLines = (motors || []).map(m => `${m.id}. ${m.jenis || ''} | ${m.plate || ''} | 24h: ${m.harga_24 || '-'} | 12h: ${m.harga_12 || '-'}`);
+          await client.sendMessage(from, 'Halo, selamat siang.\nHarga motor:\n' + priceLines.join('\n'));
+          const formTpl = 'Silakan isi formulir sewa berikut (balas dengan format "Label: nilai" per baris):\nJenis motor:\nMulai Tgl sewa:\nMulai jam sewa:\nAntar dimana:\nSelesai tgl sewa:\nSelesai jam sewa:\nAmbil motor di:\nMotor mau dipaki kemana:\nInstagram aktif:\nNama lengkap KTP:\nKTP kota mana:\nNO WA:\nNO WA kedua:';
+          await client.sendMessage(from, formTpl);
+          await client.sendMessage(from, 'baik selamat siang kak\nSilahkan jawab pertanyaan diatas sebelum order');
+        } catch (e) {
+          console.error('Error sending price message', e);
+        }
+
+        if (!sessions[from]) sessions[from] = {};
+        sessions[from].availableMotors = availableMotorIds;
       } catch (err) {
         console.error('Booking availability error', err);
         await client.sendMessage(from, 'Gagal mencari ketersediaan untuk tanggal itu: ' + (err.message || err));
@@ -738,16 +1398,92 @@ client.onMessage(async (msg) => {
     const avail = parseAvailabilityRequest(text);
     if (avail) {
       const startMs = avail.start ? avail.start.getTime() : Date.now();
-      const hours = avail.hours || 12;
       try {
-        const availMotors = await db.findAvailableMotorsWindow(startMs, hours);
-        if (!availMotors || availMotors.length === 0) {
-          const end = new Date(startMs + hours * 3600 * 1000);
-          await client.sendMessage(from, `Tidak ada motor tersedia dari ${avail.start ? avail.start.toLocaleString() : 'sekarang'} sampai ${end.toLocaleString()}.`);
-        } else {
-          const lines = availMotors.map(m => `${m.id}. ${m.jenis || ''} | ${m.plate || ''}`);
-          await client.sendMessage(from, `Motor tersedia (${availMotors.length}):\n` + lines.join('\n'));
+        const rows = await db.listAllSchedules();
+        const motors = await db.listMotors();
+
+        const ddmmToDate = (ddmm, bulanHint) => {
+          if (!ddmm) return null;
+          const s = String(ddmm).trim();
+          let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+          if (m) return new Date(parseInt(m[1],10), parseInt(m[2],10)-1, parseInt(m[3],10));
+          m = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+          if (m) { const day = parseInt(m[1],10); const month = parseInt(m[2],10); const year = m[3] ? (m[3].length===2?2000+parseInt(m[3],10):parseInt(m[3],10)) : (new Date()).getFullYear(); return new Date(year, month-1, day); }
+          m = s.match(/^(\d{1,2})$/);
+          if (m) { const day = parseInt(m[1],10); const now = new Date(); let month = now.getMonth()+1; let year = now.getFullYear(); if (bulanHint) { const bhm = String(bulanHint).match(/^(\d{1,2})(?:\/(\d{2,4}))?$/); if (bhm) { month = parseInt(bhm[1],10); if (bhm[2]) year = bhm[2].length===2?2000+parseInt(bhm[2],10):parseInt(bhm[2],10); } } return new Date(year, month-1, day); }
+          return null;
+        };
+        const timeToMinutes = (t) => { if (!t) return null; const mm = String(t).match(/(\d{1,2})[:\.]?(\d{2})?/); if (!mm) return null; const hh = parseInt(mm[1],10); const mn = mm[2]?parseInt(mm[2],10):0; return hh*60+mn; };
+
+        const scheduleStartDate = (r) => {
+          if (r.pickup_day && r.pickup_time) { const pd = ddmmToDate(r.pickup_day, r.bulan); const pm = timeToMinutes(r.pickup_time); if (pd && pm != null) { const d = new Date(pd.getTime()); d.setHours(0,0,0,0); d.setMinutes(pm); return d; } }
+          if (r.start_date && r.start_time) { const sd = ddmmToDate(r.start_date, r.bulan); const sm = timeToMinutes(r.start_time); if (sd && sm != null) { const d = new Date(sd.getTime()); d.setHours(0,0,0,0); d.setMinutes(sm); return d; } }
+          if (r.delivery_day && r.delivery_time) { const dd = ddmmToDate(r.delivery_day, r.bulan); const dm = timeToMinutes(r.delivery_time); if (dd && dm != null) { const d = new Date(dd.getTime()); d.setHours(0,0,0,0); d.setMinutes(dm); return d; } }
+          if (r.end_date && r.end_time) { const ed = ddmmToDate(r.end_date, r.bulan); const em = timeToMinutes(r.end_time); if (ed && em != null) { const d = new Date(ed.getTime()); d.setHours(0,0,0,0); d.setMinutes(em); return d; } }
+          return null;
+        };
+
+        const today = new Date(startMs);
+        const todayDay = today.getDate(); const todayMonth = today.getMonth(); const todayYear = today.getFullYear();
+
+        const bookedMotorIds = new Set();
+        const bookedByJenis = {};
+        const bookedEarliestPickupByJenis = {};
+        const schedulePickupDate = (r) => {
+          if (r.pickup_day && r.pickup_time) { const pd = ddmmToDate(r.pickup_day, r.bulan); const pm = timeToMinutes(r.pickup_time); if (pd && pm != null) { const d = new Date(pd.getTime()); d.setHours(0,0,0,0); d.setMinutes(pm); return d; } }
+          if (r.start_date && r.start_time) { const sd = ddmmToDate(r.start_date, r.bulan); const sm = timeToMinutes(r.start_time); if (sd && sm != null) { const d = new Date(sd.getTime()); d.setHours(0,0,0,0); d.setMinutes(sm); return d; } }
+          if (r.delivery_day && r.delivery_time) { const dd = ddmmToDate(r.delivery_day, r.bulan); const dm = timeToMinutes(r.delivery_time); if (dd && dm != null) { const d = new Date(dd.getTime()); d.setHours(0,0,0,0); d.setMinutes(dm); return d; } }
+          if (r.end_date && r.end_time) { const ed = ddmmToDate(r.end_date, r.bulan); const em = timeToMinutes(r.end_time); if (ed && em != null) { const d = new Date(ed.getTime()); d.setHours(0,0,0,0); d.setMinutes(em); return d; } }
+          return null;
+        };
+        for (const r of rows) {
+          const sd = scheduleStartDate(r); if (!sd) continue;
+          if (sd.getDate() === todayDay && sd.getMonth() === todayMonth && sd.getFullYear() === todayYear) {
+            if (r.motor_id) bookedMotorIds.add(String(r.motor_id));
+            const jenis = (r.motor_jenis || r.vehicle_type || 'Lainnya').toString();
+            bookedByJenis[jenis] = (bookedByJenis[jenis] || 0) + 1;
+            const pickupDt = schedulePickupDate(r);
+            if (pickupDt) {
+              const cur = bookedEarliestPickupByJenis[jenis];
+              if (!cur || pickupDt.getTime() < cur.getTime()) bookedEarliestPickupByJenis[jenis] = pickupDt;
+            }
+          }
         }
+
+        const totalByJenis = {};
+        const motorMap = {};
+        for (const m of motors) { motorMap[String(m.id)] = m; totalByJenis[m.jenis || 'Lainnya'] = (totalByJenis[m.jenis || 'Lainnya'] || 0) + 1; }
+
+        const availableMotorIds = [];
+        for (const m of motors) { if (!bookedMotorIds.has(String(m.id))) availableMotorIds.push(m.id); }
+
+        const availableByJenis = {};
+        for (const id of availableMotorIds) { const m = motorMap[String(id)]; if (!m) continue; availableByJenis[m.jenis || 'Lainnya'] = (availableByJenis[m.jenis || 'Lainnya'] || 0) + 1; }
+
+        // const parts = [];
+        // parts.push('Daftar motor tersedia hari ini:');
+        // const formatHM = (d) => { if (!d) return null; const hh = String(d.getHours()).padStart(2,'0'); const mm = String(d.getMinutes()).padStart(2,'0'); return `${hh}:${mm}`; };
+        // for (const k of Object.keys(totalByJenis).sort()) {
+        //   const avail = availableByJenis[k] || 0; const booked = bookedByJenis[k] || (totalByJenis[k] - avail);
+        //   const earliest = bookedEarliestPickupByJenis[k] || null;
+        //   if (earliest) {
+        //     const ready = new Date(earliest.getTime() + 30*60000);
+        //     parts.push(`${k}: ${avail} tersedia (${booked} diboking paling cepat ambil ${formatHM(earliest)} (ready ${formatHM(ready)}))`);
+        //   } else {
+        //     parts.push(`${k}: ${avail} tersedia (${booked} diboking)`);
+        //   }
+        // }
+
+        // await client.sendMessage(from, parts.join('\n'));
+        try {
+          const priceLines = (motors || []).map(m => `${m.id}. ${m.jenis || ''} | ${m.plate || ''} | 24h: ${m.harga_24 || '-'} | 12h: ${m.harga_12 || '-'}`);
+          await client.sendMessage(from, 'Halo, selamat siang.\nHarga motor:\n \n*BEAT*\nHARGA 24 JAM 80.000\n12 JAM : 60.000\nBiaya Antar Jemput :20.000\n\n*SCOPPY*\nHARGA 24 JAM 90.000\n12 JAM : 70.000\nBiaya Antar Jemput : 20.000\n\n*Vario*\nHARGA 24 JAM 100.000\n12 JAM : 80.000\nBiaya Antar Jemput : 20.000\n\n*NMAX/PCX*\nHARGA 24 JAM 130.000\n12 JAM : 110.000\nBiaya Antar Jemput : 20.000\n' );
+          const formTpl = 'Silakan isi formulir sewa berikut (balas dengan format "Label: nilai" per baris):\nJenis motor:\nMulai Tgl sewa:\nMulai jam sewa:\nAntar dimana:\nSelesai tgl sewa:\nSelesai jam sewa:\nAmbil motor di:\nMotor mau dipaki kemana:\nInstagram aktif:\nNama lengkap KTP:\nKTP kota mana:\nNO WA:\nNO WA kedua:';
+          await client.sendMessage(from, formTpl);
+          await client.sendMessage(from, 'baik selamat siang kak\nSilahkan jawab pertanyaan diatas sebelum order');
+        } catch (e) { console.error('Error sending form messages', e); }
+        if (!sessions[from]) sessions[from] = {};
+        sessions[from].availableMotors = availableMotorIds;
       } catch (err) {
         console.error('Availability lookup error', err);
         await client.sendMessage(from, 'Gagal mencari ketersediaan motor: ' + (err.message || err));
@@ -755,12 +1491,38 @@ client.onMessage(async (msg) => {
       return;
     }
 
-    const qaRows = await findBestMatch(text);
-    const answer = bestAnswer(text, qaRows, 0.25);
-    if (answer) {
-      await client.sendMessage(from, answer);
-    } else {
-      await client.sendMessage(from, 'Maaf, aku belum punya jawaban untuk itu. Tambahkan di dashboard ya.');
+    // Use trained NLP model for non-admin conversations; support DB-driven intents
+    try {
+      const res = await nlpRunner.processText(text);
+      const intent = res && res.intent ? String(res.intent) : 'None';
+
+      // handle DB-driven intent: list motors
+      if (intent === 'list.motors' || /list\.motors/.test(intent)) {
+        try {
+          const motors = await db.listMotors();
+          if (!motors || motors.length === 0) {
+            await client.sendMessage(from, 'Belum ada data motor.');
+          } else {
+            const lines = motors.map(m => `${m.id}. ${m.jenis || ''} | ${m.plate || ''}`);
+            await client.sendMessage(from, `Daftar motor (${motors.length}):\n` + lines.join('\n'));
+          }
+        } catch (e) {
+          console.error('DB listMotors error', e);
+          await client.sendMessage(from, 'Gagal mengambil daftar motor.');
+        }
+        return;
+      }
+
+      // fallback to model-provided answer (if any)
+      const answer = await nlpRunner.getAnswer(text);
+      if (answer) {
+        await client.sendMessage(from, answer);
+      } else {
+        await client.sendMessage(from, 'Maaf, saya belum mengerti. Coba ulangi dengan kata lain atau hubungi admin.');
+      }
+    } catch (e) {
+      console.error('NLP reply error', e);
+      await client.sendMessage(from, 'Terjadi kesalahan saat memproses pesan.');
     }
   } catch (err) {
     console.error('Message handling error', err);
@@ -868,13 +1630,41 @@ app.post('/api/motors', async (req, res) => {
   try {
     const { jenis, plate } = req.body || {};
     if (!plate) return res.status(400).json({ error: 'plate required' });
-    const sql = `INSERT INTO motors (jenis, plate) VALUES (?, ?)`;
-    db.db.run(sql, [jenis || '', plate], function(err) {
+    const { harga_24, harga_12 } = req.body || {};
+    const sql = `INSERT INTO motors (jenis, plate, harga_24, harga_12) VALUES (?, ?, ?, ?)`;
+    db.db.run(sql, [jenis || '', plate, harga_24 || '', harga_12 || ''], function(err) {
       if (err) return res.status(500).json({ error: 'DB error', details: err.message });
       res.json({ id: this.lastID, jenis: jenis || '', plate });
     });
   } catch (err) {
     res.status(500).json({ error: 'DB error', details: err.message });
+  }
+});
+
+// Update motor by id
+app.put('/api/motors/:id', async (req, res) => {
+  const id = req.params.id;
+  const { jenis, plate, harga_24, harga_12 } = req.body || {};
+  if (!id) return res.status(400).json({ error: 'id required' });
+  try {
+    const result = await db.updateMotor ? await db.updateMotor(id, jenis || '', plate || '', harga_24 || '', harga_12 || '') : null;
+    if (result && result.changes === 0) return res.status(404).json({ error: 'Motor not found or no change' });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'DB error', details: err.message });
+  }
+});
+
+// Change motor id (oldId -> newId) and update schedules.motor_id
+app.post('/api/motors/change-id', async (req, res) => {
+  try {
+    const { oldId, newId } = req.body || {};
+    if (!oldId || !newId) return res.status(400).json({ error: 'oldId and newId required' });
+    if (isNaN(Number(oldId)) || isNaN(Number(newId))) return res.status(400).json({ error: 'IDs must be numeric' });
+    const result = await db.changeMotorId ? await db.changeMotorId(oldId, newId) : await require('./db').changeMotorId(oldId, newId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'DB error', details: err && err.message });
   }
 });
 

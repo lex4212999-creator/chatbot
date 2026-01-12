@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>KTP Scanner Local</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 50px; }
+        .card { border: 1px solid #ccc; padding: 20px; border-radius: 10px; box-shadow: 2px 2px 10px #eee; }
+        #result { margin-top: 20px; background: #f4f4f4; padding: 15px; width: 100%; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>Upload KTP untuk Scan</h2>
+        <input type="file" id="imageInput" accept="image/*">
+        <button onclick="uploadImage()">Scan Sekarang</button>
+    </div>
+
+    <div id="result">
+        <strong>Hasil Scan:</strong>
+        <p>NIK: <span id="resNik">-</span></p>
+        <p>Nama: <span id="resNama">-</span></p>
+    </div>
+
+    <script>
+        async function uploadImage() {
+            const input = document.getElementById('imageInput');
+            if (input.files.length === 0) return alert('Pilih foto dulu');
+
+            const formData = new FormData();
+            formData.append('image', input.files[0]);
+
+            document.getElementById('resNik').innerText = "Memproses...";
+            
+            const response = await fetch('/upload-ktp', { method: 'POST', body: formData });
+            const data = await response.json();
+
+            document.getElementById('resNik').innerText = data.nik;
+            document.getElementById('resNama').innerText = data.nama;
+        }
+    </script>
+</body>
+</html>
