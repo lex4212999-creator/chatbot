@@ -32,29 +32,7 @@ const upload = multer({ dest: path.join(__dirname, 'data', 'uploads') });
 
 let sessions = {};
 
-
-app.post('/api/upload-excel', upload.single('file'), async (req, res) => {
-  try {
-    const filePath = req.file.path;
-    const workbook = xlsx.readFile(filePath);
-    const sheetName = workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
-    const rows = xlsx.utils.sheet_to_json(sheet);
-
-    // masukkan ke tabel products
-    const stmt = db_stok.prepare(`INSERT INTO products (name, spec, price) VALUES (?, ?, ?)`);
-    rows.forEach(r => {
-      stmt.run(r.Name, r.Spec, r.Price);
-    });
-    stmt.finalize();
-
-    fs.unlinkSync(filePath); // hapus file setelah diproses
-    res.json({ success: true, count: rows.length });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Upload Excel gagal', details: err.message });
-  }
-});
+// API routes will be mounted after WhatsApp client is initialized (below)
 
 const client = new WhatsAppService(SESSION_PATH);
 const { MessageMedia } = require('whatsapp-web.js');
@@ -67,39 +45,28 @@ client.on('status', (status) => {
   io.emit('status', status);
 });
 
+// mount API routes now that client exists
+try {
+  require('./routes/api')(app, { db, db_stok, db_admin, upload, client, sessions, MessageMedia, io });
+} catch (e) {
+  console.error('Failed to mount API routes', e && e.message);
+}
+
 // Handle pesan masuk
 client.onMessage(async (msg) => {
   const text = (msg.body || '').trim();
   const from = msg.from;
 
-  // helper: resolve motor input (id, plate, or jenis). returns {found} or {ambiguous: [...] } or null
-  const resolveMotor = async (motorVal) => {
-    if (!motorVal) return null;
-    const asId = parseInt(String(motorVal).trim(), 10);
-    if (!isNaN(asId)) {
-      const byId = (db.getMotorById) ? await db.getMotorById(asId).catch(() => null) : null;
-      if (byId) return { found: byId };
-    }
-    if (!db.listMotors) return null;
-    const motors = await db.listMotors().catch(() => []);
-    const val = String(motorVal || '').toLowerCase().trim();
-    // exact plate match
-    let found = motors.find(m => (m.plate || '').toLowerCase() === val);
-    if (found) return { found };
-    // exact jenis match
-    found = motors.find(m => (m.jenis || '').toLowerCase() === val);
-    if (found) return { found };
-    // substring jenis match (e.g., user sends 'vario')
-    const candidates = motors.filter(m => {
-      const jenis = (m.jenis || '').toLowerCase();
-      return jenis.includes(val) || val.includes(jenis);
-    });
-    if (candidates.length >= 1) return { found: candidates[0] };
-    // plate contains
-    found = motors.find(m => (m.plate || '').toLowerCase().includes(val));
-    if (found) return { found };
-    return null;
-  };
+  const utils = require('./lib/utils');
+  const adminHandler = require('./handlers/adminCommands');
+
+  // delegate admin commands and pending actions
+  try {
+    const handled = await adminHandler.handleAdmin({ from, text, msg, client, db, sessions, db_admin, MessageMedia, io });
+    if (handled) return;
+  } catch (e) {
+    console.error('admin handler error', e && e.message);
+  }
 
   // admin login (do not require prior session)
   if (text.startsWith('/admin login')) {
@@ -121,7 +88,7 @@ client.onMessage(async (msg) => {
     return;
   }
 
-  // handle pending admin confirmations (e.g. reply 'yes')
+  // handle pending admin confirmations and interactive actions (e.g. reply 'yes' or motor selection)
   if (sessions[from] && sessions[from].pendingAction) {
     const pending = sessions[from].pendingAction;
     if (text.toLowerCase() === 'yes') {
@@ -138,6 +105,91 @@ client.onMessage(async (msg) => {
         }
       }
     }
+
+    // pendingAction object for choosing motor from candidates
+    if (pending && typeof pending === 'object' && pending.action === 'choose_motor') {
+      const p = pending;
+      const t = text.trim().toLowerCase();
+      if (t === 'cancel') {
+        delete sessions[from].pendingAction;
+        return client.sendMessage(from, 'Penugasan jadwal dibatalkan.');
+      }
+      const chosenId = parseInt(text.trim(), 10);
+      if (isNaN(chosenId)) return client.sendMessage(from, 'Silakan balas dengan ID motor yang valid atau ketik "cancel".');
+      try {
+        const rows = await db.listAllSchedules ? await db.listAllSchedules() : await db.listSchedules();
+        const motors = await db.listMotors();
+        const motor = motors.find(m => Number(m.id) === Number(chosenId));
+        if (!motor) return client.sendMessage(from, `Motor ID ${chosenId} tidak ditemukan dalam kandidat.`);
+
+        const ddmmToDate = (ddmm, bulanHint) => {
+          if (!ddmm) return null;
+          const s = String(ddmm).trim();
+          let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+          if (m) return new Date(parseInt(m[1],10), parseInt(m[2],10)-1, parseInt(m[3],10));
+          m = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+          if (m) { const day = parseInt(m[1],10); const month = parseInt(m[2],10); const year = m[3] ? (m[3].length===2?2000+parseInt(m[3],10):parseInt(m[3],10)) : (new Date()).getFullYear(); return new Date(year, month-1, day); }
+          m = s.match(/^(\d{1,2})$/);
+          if (m) { const day = parseInt(m[1],10); let month = (new Date()).getMonth()+1; let year = (new Date()).getFullYear(); if (bulanHint) { const bhm = String(bulanHint).match(/^(\d{1,2})(?:\/(\d{2,4}))?$/); if (bhm) { month = parseInt(bhm[1],10); if (bhm[2]) year = bhm[2].length===2?2000+parseInt(bhm[2],10):parseInt(bhm[2],10); } } return new Date(year, month-1, day); }
+          return null;
+        };
+        const timeToMinutes = (t) => { if (!t) return null; const mm = String(t).match(/(\d{1,2})[:\.]?(\d{2})?/); if (!mm) return null; const hh = parseInt(mm[1],10); const mn = mm[2]?parseInt(mm[2],10):0; return hh*60+mn; };
+        const scheduleIntervalMs = (row) => {
+          let startDate = null, endDate = null;
+          if (row.pickup_day && row.pickup_time) { const pd = ddmmToDate(row.pickup_day, row.bulan); const pm = timeToMinutes(row.pickup_time); if (pd && pm != null) { const d = new Date(pd.getTime()); d.setHours(0,0,0,0); d.setMinutes(pm); startDate = d; } }
+          if (!startDate && row.start_date && row.start_time) { const sd = ddmmToDate(row.start_date, row.bulan); const sm = timeToMinutes(row.start_time); if (sd && sm != null) { const d = new Date(sd.getTime()); d.setHours(0,0,0,0); d.setMinutes(sm); startDate = d; } }
+          if (row.delivery_day && row.delivery_time) { const dd = ddmmToDate(row.delivery_day, row.bulan); const dm = timeToMinutes(row.delivery_time); if (dd && dm != null) { const d = new Date(dd.getTime()); d.setHours(0,0,0,0); d.setMinutes(dm); endDate = d; } }
+          if (!endDate && row.end_date && row.end_time) { const ed = ddmmToDate(row.end_date, row.bulan); const em = timeToMinutes(row.end_time); if (ed && em != null) { const d = new Date(ed.getTime()); d.setHours(0,0,0,0); d.setMinutes(em); endDate = d; } }
+          if (startDate && !endDate) endDate = new Date(startDate.getTime());
+          if (!startDate && endDate) startDate = new Date(endDate.getTime());
+          if (!startDate && !endDate) return null;
+          return { startMs: startDate.getTime(), endMs: endDate.getTime() };
+        };
+
+        const desired = p.desired;
+        const motorSchedules = rows.filter(s => (s.motor_id != null && String(s.motor_id) === String(chosenId)) || ((s.motor_plate || s.plate || '') && (s.motor_plate || s.plate || '').toLowerCase() === (motor.plate || '').toLowerCase()));
+        let overlapFound = false;
+        for (const s of motorSchedules) {
+          const iv = scheduleIntervalMs(s);
+          if (!iv) continue;
+          if (iv.endMs >= desired.startMs && iv.startMs <= desired.endMs) { overlapFound = true; break; }
+        }
+        if (overlapFound) return client.sendMessage(from, `Motor ID ${chosenId} sedang sibuk pada interval yang diminta. Pilih motor lain atau ketik 'cancel'.`);
+
+        const nota = p.nota;
+        const item = {
+          vehicle_type: motor.jenis || nota.vehicle_type || nota.motor_jenis || '',
+          motor_id: motor.id,
+          plate: motor.plate || nota.plate || '',
+          delivery_day: nota.delivery_day || nota.start_date || '',
+          delivery_time: nota.delivery_time || nota.start_time || '',
+          pickup_day: nota.pickup_day || nota.end_date || '',
+          pickup_time: nota.pickup_time || nota.end_time || '',
+          pickup: nota.pickup || '',
+          dropoff: nota.dropoff || '',
+          total_price: nota.total_price || nota.price || '',
+          entry_text: nota.entry_text || '',
+          customer: nota.customer || nota.name || '',
+          WA_1: nota.WA_1 || nota.WA || '' ,
+          no_form: nota.no_form || ''
+        };
+        const row = await db.addSchedule(item);
+        delete sessions[from].pendingAction;
+        await client.sendMessage(from, `Jadwal dari nota ${p.no_form} berhasil dibuat. Jadwal ID ${row.id} — Motor: ${motor.id} ${motor.plate}`);
+        try {
+          const phoneRaw = (nota.WA_1 || nota.WA_1 || nota.WA || nota.WA_1 || '').toString().replace(/[^0-9]/g, '');
+          if (phoneRaw) {
+            const targetJid = `${phoneRaw}@c.us`;
+            await client.client.sendMessage(targetJid, 'Jadwal sudah kita inputkan ka');
+          }
+        } catch (e) { console.error('Failed to notify customer', e && e.message); }
+        return;
+      } catch (err) {
+        console.error('Choose motor pending error', err);
+        return client.sendMessage(from, 'Gagal memproses pilihan motor: ' + (err && err.message));
+      }
+    }
+
     // If reply is not 'yes', fall through to admin commands or QA.
   }
   
@@ -193,7 +245,7 @@ client.onMessage(async (msg) => {
       }
       // resolve motor by id, plate, or jenis (support 'vario' etc.)
       const motorVal = form['motor'];
-      const resolved = await resolveMotor(motorVal);
+      const resolved = await utils.resolveMotor(db, motorVal);
       if (!resolved) return client.sendMessage(from, `Motor '${motorVal}' tidak ditemukan. Gunakan ID, jenis (mis. vario) atau plate yang muncul di daftar.`);
       const motorObj = resolved.found;
       // date/time validation
@@ -279,7 +331,7 @@ client.onMessage(async (msg) => {
       try {
         const form = sessions[from].partialForm || {};
         const motorVal = form['motor'];
-        const resolved = await resolveMotor(motorVal);
+        const resolved = await utils.resolveMotor(db, motorVal);
         if (!resolved) return client.sendMessage(from, `Motor '${motorVal}' tidak ditemukan. Gunakan ID, jenis (mis. vario) atau plate yang muncul di daftar.`);
         const motorObj = resolved.found;
         const isValidDate = (d) => /^(?:\d{1,2}\/\d{1,2}|\d{1,2})$/.test(d);
@@ -356,7 +408,7 @@ client.onMessage(async (msg) => {
       }
       // resolve motor input (id, plate, or jenis)
       const motorVal = form['motor'];
-      const resolved = await resolveMotor(motorVal);
+      const resolved = await utils.resolveMotor(db, motorVal);
       if (!resolved) return client.sendMessage(from, `Motor '${motorVal}' tidak ditemukan. Gunakan ID, jenis (mis. vario) atau plate yang muncul di daftar.`);
       const motorObj = resolved.found;
       // validate dates and times
@@ -458,7 +510,14 @@ client.onMessage(async (msg) => {
         item.client_jid = from;
         // persist no_form into session form for admin message
         sessions[from].form.no_form = item.no_form;
-        await db.addSchedule(item).catch(() => null);
+        // persist draft into schedule_dump so admin can operate later
+        try {
+          const saved = await db.addDumpSchedule ? await db.addDumpSchedule(item) : await require('./db').addDumpSchedule(item);
+          sessions[from].draftSchedule = saved;
+        } catch (e) {
+          console.error('Failed to persist draft schedule to dump table', e && e.message);
+          sessions[from].draftSchedule = item;
+        }
       } catch (err) {
         console.error('Saving schedule from user form failed', err);
       }
@@ -474,7 +533,7 @@ client.onMessage(async (msg) => {
         msgLines.push('Verifikasi booking baru:');
         msgLines.push(`No Form: ${sessions[from].form.no_form || ''}`);
         msgLines.push(`Nama: ${form.customer || ''}`);
-        msgLines.push(`No WA (pengirim): ${noid}`);
+        msgLines.push(`No WA (pengirim): ${sessions[from].form.WA_1 || noid}`);
         msgLines.push(`WA_1 (input): ${sessions[from].form.WA_1 || ''}`);
         msgLines.push(`WA_2 (input): ${sessions[from].form.WA_2 || ''}`);
         msgLines.push(`Jenis motor: ${form.jenis || ''}`);
@@ -852,6 +911,113 @@ client.onMessage(async (msg) => {
       // Not an admin-id delete, continue so other more specific '/admin delete ...' handlers can match.
     }
 
+    if (text.startsWith('/admin add jadwal')) {
+      // manual flow: /admin add jadwal <no_form> [| jenis]
+      const rest = text.replace('/admin add jadwal', '').trim();
+      const parts = rest.split('|').map(p => p.trim()).filter(Boolean);
+      const noForm = parts[0] || '';
+      const overrideJenis = parts[1] || null;
+      if (!noForm) return client.sendMessage(from, "Format: /admin add jadwal <no_form> atau '/admin add jadwal <no_form> | <jenis>'");
+      try {
+        // prefer session draft/form for nota (manual flow) before checking DB
+        let nota = null;
+        try {
+          for (const sid of Object.keys(sessions || {})) {
+            const s = sessions[sid];
+            if (!s) continue;
+            if (s.form && String(s.form.no_form) === String(noForm)) {
+              nota = Object.assign({}, s.form);
+              nota.client_jid = sid;
+              break;
+            }
+            if (s.draftSchedule && String(s.draftSchedule.no_form) === String(noForm)) {
+              nota = Object.assign({}, s.draftSchedule);
+              nota.client_jid = sid;
+              break;
+            }
+          }
+        } catch (e) { console.error('session search error', e); }
+
+        if (!nota) {
+          try {
+            nota = await (db.getDumpScheduleByNoForm ? db.getDumpScheduleByNoForm(noForm) : null);
+          } catch (e) {
+            nota = null;
+          }
+        }
+        if (!nota) return client.sendMessage(from, `Nota / jadwal dengan no_form ${noForm} tidak ditemukan di schedule_dump.`);
+
+        const desiredStartStr = nota.delivery_day || nota.start_date || '';
+        const desiredStartTime = nota.delivery_time || nota.start_time || '';
+        const desiredEndStr = nota.pickup_day || nota.end_date || '';
+        const desiredEndTime = nota.pickup_time || nota.end_time || '';
+
+        const ddmmToDate = (ddmm, bulanHint) => {
+          if (!ddmm) return null;
+          const s = String(ddmm).trim();
+          let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+          if (m) return new Date(parseInt(m[1],10), parseInt(m[2],10)-1, parseInt(m[3],10));
+          m = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+          if (m) { const day = parseInt(m[1],10); const month = parseInt(m[2],10); const year = m[3] ? (m[3].length===2?2000+parseInt(m[3],10):parseInt(m[3],10)) : (new Date()).getFullYear(); return new Date(year, month-1, day); }
+          m = s.match(/^(\d{1,2})$/);
+          if (m) { const day = parseInt(m[1],10); let month = (new Date()).getMonth()+1; let year = (new Date()).getFullYear(); if (bulanHint) { const bhm = String(bulanHint).match(/^(\d{1,2})(?:\/(\d{2,4}))?$/); if (bhm) { month = parseInt(bhm[1],10); if (bhm[2]) year = bhm[2].length===2?2000+parseInt(bhm[2],10):parseInt(bhm[2],10); } } return new Date(year, month-1, day); }
+          return null;
+        };
+        const timeToMinutes = (t) => { if (!t) return null; const mm = String(t).match(/(\d{1,2})[:\.]?(\d{2})?/); if (!mm) return null; const hh = parseInt(mm[1],10); const mn = mm[2]?parseInt(mm[2],10):0; return hh*60+mn; };
+
+        const dStartD = ddmmToDate(desiredStartStr, nota.bulan);
+        const dStartM = timeToMinutes(desiredStartTime);
+        const dEndD = ddmmToDate(desiredEndStr, nota.bulan);
+        const dEndM = timeToMinutes(desiredEndTime);
+        if (!dStartD || dStartM == null || !dEndD || dEndM == null) return client.sendMessage(from, 'Tidak dapat menentukan interval dari nota (cek delivery/pickup day atau time).');
+        const dStart = new Date(dStartD.getTime()); dStart.setHours(0,0,0,0); dStart.setMinutes(dStartM);
+        const dEnd = new Date(dEndD.getTime()); dEnd.setHours(0,0,0,0); dEnd.setMinutes(dEndM);
+
+        // find motors of requested jenis (take jenis from nota primarily)
+        const wantedJenis = (overrideJenis || (nota && nota.jenis) || nota.vehicle_type || '').toString().trim().toLowerCase();
+        const motors = await db.listMotors();
+        const candidates = (motors || []).filter(m => (m.jenis || '').toString().toLowerCase() === wantedJenis);
+
+        const scheduleIntervalMs = (row) => {
+          let startDate = null, endDate = null;
+          if (row.pickup_day && row.pickup_time) { const pd = ddmmToDate(row.pickup_day, row.bulan); const pm = timeToMinutes(row.pickup_time); if (pd && pm != null) { const d = new Date(pd.getTime()); d.setHours(0,0,0,0); d.setMinutes(pm); startDate = d; } }
+          if (!startDate && row.start_date && row.start_time) { const sd = ddmmToDate(row.start_date, row.bulan); const sm = timeToMinutes(row.start_time); if (sd && sm != null) { const d = new Date(sd.getTime()); d.setHours(0,0,0,0); d.setMinutes(sm); startDate = d; } }
+          if (row.delivery_day && row.delivery_time) { const dd = ddmmToDate(row.delivery_day, row.bulan); const dm = timeToMinutes(row.delivery_time); if (dd && dm != null) { const d = new Date(dd.getTime()); d.setHours(0,0,0,0); d.setMinutes(dm); endDate = d; } }
+          if (!endDate && row.end_date && row.end_time) { const ed = ddmmToDate(row.end_date, row.bulan); const em = timeToMinutes(row.end_time); if (ed && em != null) { const d = new Date(ed.getTime()); d.setHours(0,0,0,0); d.setMinutes(em); endDate = d; } }
+          if (startDate && !endDate) endDate = new Date(startDate.getTime());
+          if (!startDate && endDate) startDate = new Date(endDate.getTime());
+          if (!startDate && !endDate) return null;
+          return { startMs: startDate.getTime(), endMs: endDate.getTime(), row };
+        };
+
+        const desired = { startMs: dStart.getTime(), endMs: dEnd.getTime() };
+        // load all existing schedules to evaluate availability
+        const rowsAll = await (db.listAllSchedules ? db.listAllSchedules() : db.listSchedules());
+        const listMsg = [];
+        const candidateObjs = [];
+        for (const c of candidates) {
+          const motorSchedules = rowsAll.filter(s => (s.motor_id != null && String(s.motor_id) === String(c.id)) || ((s.motor_plate || s.plate || '') && (s.motor_plate || s.plate || '').toLowerCase() === (c.plate || '').toLowerCase()));
+          let busy = false; let overlapWith = null;
+          for (const s of motorSchedules) {
+            const iv = scheduleIntervalMs(s);
+            if (!iv) continue;
+            if (iv.endMs >= desired.startMs && iv.startMs <= desired.endMs) { busy = true; overlapWith = iv.row && iv.row.id; break; }
+          }
+          candidateObjs.push({ id: c.id, plate: c.plate, jenis: c.jenis, busy, overlapWith });
+          listMsg.push(`${c.id}. ${c.jenis || ''} | ${c.plate || ''} | ${busy ? ('busy (overlap jadwal ' + (overlapWith || '?') + ')') : 'free'}`);
+        }
+        if (!candidateObjs.length) return client.sendMessage(from, `Tidak ada motor dengan jenis '${wantedJenis}' untuk dipilih.`);
+        // store pending action and ask admin to pick
+        if (!sessions[from]) sessions[from] = {};
+        sessions[from].pendingAction = { action: 'choose_motor', no_form: noForm, nota: nota, desired, candidates: candidateObjs };
+        const reply = [`Nota ${noForm}: jenis motor = ${wantedJenis || '(tidak tersedia)'}`, 'Kandidat:'].concat(listMsg).join('\n');
+        return client.sendMessage(from, reply + '\nBalas dengan ID motor untuk assign, atau ketik cancel.');
+      } catch (err) {
+        console.error('admin add jadwal error', err);
+        return client.sendMessage(from, 'Gagal memproses permintaan add jadwal: ' + (err && err.message));
+      }
+    }
+    
     if (text.startsWith('/admin add schedule')) {
       // Accept only compact slash-separated format (no '|' legacy):
       // motorId / antarDay-ambilDay / antarTime-ambilTime / antarLoc-ambilLoc / customer / price
@@ -1216,8 +1382,50 @@ client.onMessage(async (msg) => {
       const id = rest.split('|').map(s=>s.trim()).filter(Boolean)[0] || rest;
       if (!id) return client.sendMessage(from, 'Format: /admin nota | <scheduleId>');
       try {
-        const rows = await db.listAllSchedules();
-        const schedule = (rows || []).find(r => String(r.id) === String(id) || String(r.no_form) === String(id));
+        // First, try persistent dump table where submitted forms are stored
+        let schedule = null;
+        try {
+          if (db.getDumpScheduleByNoForm) {
+            const dump = await db.getDumpScheduleByNoForm(id).catch(() => null);
+            if (dump) schedule = dump;
+          }
+        } catch (e) { console.error('dump lookup error', e); }
+
+        // Next, prefer live session draft/form data
+        if (!schedule) {
+          try {
+            for (const sk of Object.keys(sessions || {})) {
+              const s = sessions[sk];
+              if (!s) continue;
+              if (s.form && String(s.form.no_form) === String(id)) {
+                schedule = Object.assign({}, s.form);
+                schedule.client_jid = sk;
+                schedule.motor_jenis = s.form.jenis || s.form.vehicle_type || '';
+                schedule.delivery_day = s.form.delivery_day || s.form.start_date || '';
+                schedule.delivery_time = s.form.delivery_time || s.form.start_time || '';
+                schedule.pickup_day = s.form.pickup_day || s.form.end_date || '';
+                schedule.pickup_time = s.form.pickup_time || s.form.end_time || '';
+                schedule.customer = s.form.customer || s.form.name || '';
+                schedule.WA_1 = s.form.WA_1 || '';
+                schedule.no_form = s.form.no_form || id;
+                schedule.id = null;
+                break;
+              }
+              if (s.draftSchedule && String(s.draftSchedule.no_form) === String(id)) {
+                schedule = Object.assign({}, s.draftSchedule);
+                schedule.client_jid = sk;
+                schedule.id = null;
+                break;
+              }
+            }
+          } catch (e) { console.error('search sessions for nota error', e); }
+        }
+
+        // Finally, fallback to persisted schedules table
+        if (!schedule) {
+          const rows = await db.listAllSchedules();
+          schedule = (rows || []).find(r => String(r.id) === String(id) || String(r.no_form) === String(id));
+        }
         if (!schedule) return client.sendMessage(from, `Jadwal ID ${id} tidak ditemukan.`);
 
         const ddmmToDate = (ddmm, bulanHint) => {
@@ -1528,368 +1736,7 @@ client.onMessage(async (msg) => {
     console.error('Message handling error', err);
   }
 });
-// API daftar QA
-app.get('/api/qa', async (req, res) => {
-  try {
-    const rows = await listQA();
-    res.json(rows);
-  } catch (err) {
-    res.status(500).json({ error: 'DB error', details: err.message });
-  }
-});
-
-// API tambah QA
-app.post('/api/qa', async (req, res) => {
-  const { question, answer } = req.body;
-  if (!question || !answer) {
-    return res.status(400).json({ error: 'Question and answer required' });
-  }
-  try {
-    const row = await addQA(question, answer);
-    res.json(row);
-  } catch (err) {
-    res.status(500).json({ error: 'DB error', details: err.message });
-  }
-});
-
-// API update QA
-app.put('/api/qa/:id', async (req, res) => {
-  const id = req.params.id;
-  const { question, answer } = req.body;
-  if (!question || !answer) return res.status(400).json({ error: 'Question and answer required' });
-  try {
-    const result = await db.updateQA ? await db.updateQA(id, question, answer) : await require('./db').updateQA(id, question, answer);
-    if (result.changes === 0) return res.status(404).json({ error: 'QA not found' });
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'DB error', details: err.message });
-  }
-});
-
-// API delete QA
-app.delete('/api/qa/:id', async (req, res) => {
-  const id = req.params.id;
-  try {
-    const result = await db.deleteQA ? await db.deleteQA(id) : await require('./db').deleteQA(id);
-    if (result.changes === 0) return res.status(404).json({ error: 'QA not found' });
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'DB error', details: err.message });
-  }
-});
-
-// API status WA
-app.get('/api/status', (req, res) => {
-  // Status terbaru dikirim via socket. Endpoint ini sederhana saja.
-  res.json({ ok: true });
-});
-
-// Minimal schedules endpoints: add and list
-app.get('/api/schedules', async (req, res) => {
-  try {
-    const rows = await db.listSchedules();
-    res.json(rows);
-  } catch (err) {
-    res.status(500).json({ error: 'DB error', details: err.message });
-  }
-});
-
-// Full schedules listing (excludes future 'bulan' bookings until their day arrives)
-app.get('/api/schedules/full', async (req, res) => {
-  try {
-    if (!db.listSchedulesFull) return res.status(500).json({ error: 'DB missing listSchedulesFull' });
-    const rows = await db.listSchedulesFull();
-    res.json(rows);
-  } catch (err) {
-    res.status(500).json({ error: 'DB error', details: err.message });
-  }
-});
-
-// list distinct plates for dropdown
-app.get('/api/plates', async (req, res) => {
-  try {
-    if (!db.listPlates) return res.json([]);
-    const rows = await db.listPlates();
-    res.json(rows);
-  } catch (err) {
-    res.status(500).json({ error: 'DB error', details: err.message });
-  }
-});
-
-// motors endpoints: list and add
-app.get('/api/motors', async (req, res) => {
-  try {
-    const rows = await db.listPlates();
-    res.json(rows);
-  } catch (err) {
-    res.status(500).json({ error: 'DB error', details: err.message });
-  }
-});
-
-app.post('/api/motors', async (req, res) => {
-  try {
-    const { jenis, plate } = req.body || {};
-    if (!plate) return res.status(400).json({ error: 'plate required' });
-    const { harga_24, harga_12 } = req.body || {};
-    const sql = `INSERT INTO motors (jenis, plate, harga_24, harga_12) VALUES (?, ?, ?, ?)`;
-    db.db.run(sql, [jenis || '', plate, harga_24 || '', harga_12 || ''], function(err) {
-      if (err) return res.status(500).json({ error: 'DB error', details: err.message });
-      res.json({ id: this.lastID, jenis: jenis || '', plate });
-    });
-  } catch (err) {
-    res.status(500).json({ error: 'DB error', details: err.message });
-  }
-});
-
-// Update motor by id
-app.put('/api/motors/:id', async (req, res) => {
-  const id = req.params.id;
-  const { jenis, plate, harga_24, harga_12 } = req.body || {};
-  if (!id) return res.status(400).json({ error: 'id required' });
-  try {
-    const result = await db.updateMotor ? await db.updateMotor(id, jenis || '', plate || '', harga_24 || '', harga_12 || '') : null;
-    if (result && result.changes === 0) return res.status(404).json({ error: 'Motor not found or no change' });
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'DB error', details: err.message });
-  }
-});
-
-// Change motor id (oldId -> newId) and update schedules.motor_id
-app.post('/api/motors/change-id', async (req, res) => {
-  try {
-    const { oldId, newId } = req.body || {};
-    if (!oldId || !newId) return res.status(400).json({ error: 'oldId and newId required' });
-    if (isNaN(Number(oldId)) || isNaN(Number(newId))) return res.status(400).json({ error: 'IDs must be numeric' });
-    const result = await db.changeMotorId ? await db.changeMotorId(oldId, newId) : await require('./db').changeMotorId(oldId, newId);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'DB error', details: err && err.message });
-  }
-});
-
-app.post('/api/schedules', async (req, res) => {
-  try {
-    const item = req.body || {};
-    // basic validation: need vehicle_type, plate and name
-    if (!item.vehicle_type) return res.status(400).json({ error: 'vehicle_type required' });
-    const plate = (item.plate || '').trim();
-    if (!plate) return res.status(400).json({ error: 'plate required' });
-    if (!item.name) return res.status(400).json({ error: 'name is required' });
-
-    // helper parsers (existing)
-    const parsePeriodToDates = (p) => {
-      // Returns { startDate: Date|null, endDate: Date|null }
-      if (!p) return { startDate: null, endDate: null };
-      const raw = p.replace(/\s+/g,'');
-      const parts = raw.split('-');
-      const now = new Date();
-      const thisYear = now.getFullYear();
-      const thisMonth = now.getMonth() + 1; // 1-12
-
-      const parsePart = (part) => {
-        // supports dd/mm or d
-        const m1 = part.match(/^(\d{1,2})\/(\d{1,2})$/);
-        if (m1) {
-          const day = parseInt(m1[1],10);
-          const month = parseInt(m1[2],10);
-          return new Date(thisYear, month - 1, day);
-        }
-        const m2 = part.match(/^(\d{1,2})$/);
-        if (m2) {
-          const day = parseInt(m2[1],10);
-          return new Date(thisYear, thisMonth - 1, day);
-        }
-        return null;
-      };
-
-      const startDate = parsePart(parts[0]);
-      let endDate = null;
-      if (parts.length > 1) endDate = parsePart(parts[1]);
-      if (!endDate && startDate) endDate = startDate;
-      return { startDate, endDate };
-    };
-    const toMinutes = (hhmm) => {
-      if (!hhmm) return null;
-      const m = hhmm.match(/(\d{1,2})[:\.]?(\d{2})?/);
-      if (!m) return null;
-      const hh = parseInt(m[1],10);
-      const mm = m[2] ? parseInt(m[2],10) : 0;
-      return hh*60 + mm;
-    };
-    const parseTimeRange = (t) => {
-      if (!t) return { startMin: null, endMin: null };
-      const parts = t.split(/[-–—\/]/).map(s=>s.trim()).filter(Boolean);
-      if (parts.length === 1) {
-        const s = toMinutes(parts[0]);
-        return { startMin: s, endMin: s };
-      }
-      const s = toMinutes(parts[0]);
-      const e = toMinutes(parts[1]);
-      return { startMin: s, endMin: e };
-    };
-
-    const parseEntryText = (txt) => {
-      const parts = (txt||'').split('/').map(p=>p.trim()).filter(Boolean);
-      let period=''; let time=''; let pickup=''; let dropoff=''; let customer=''; let price='';
-      // detect period (first part like 1-2)
-      if (parts.length>0 && /^(\d+)(?:-\d+)?$/.test(parts[0].replace(/\s+/g,''))) {
-        period = parts.shift();
-      }
-      // detect time part (contains digits and ':' or '.') and maybe '-'
-      const timeIdx = parts.findIndex(p=>/\d{1,2}[:\.]?\d{0,2}(?:\s*[-–—\/]\s*\d{1,2}[:\.]?\d{0,2})?/.test(p));
-      if (timeIdx !== -1) {
-        time = parts.splice(timeIdx,1)[0];
-      }
-      // detect price if numeric at end
-      if (parts.length && /^\d+$/.test(parts[parts.length-1])) {
-        price = parts.pop();
-      }
-      // remaining parts may include customer and pickup-dropoff
-      if (parts.length) {
-        // look for pickup-dropoff pattern
-        const locIdx = parts.findIndex(p=>/[-–—]/.test(p));
-        if (locIdx !== -1) {
-          const p = parts.splice(locIdx,1)[0];
-          const [a,b] = p.split(/[-–—]/).map(s=>s.trim());
-          pickup = a || '';
-          dropoff = b || a || '';
-        }
-      }
-      if (!pickup && parts.length) {
-        // if single location string remains
-        pickup = parts.shift() || '';
-        dropoff = pickup;
-      }
-      if (parts.length) {
-        customer = parts.join(' / ');
-      }
-      return { period, time, pickup, dropoff, customer, price };
-    };
-    // if entry_text present, parse it to fill fields; otherwise accept explicit fields from client
-    if (item.entry_text) {
-      const parsed = parseEntryText(item.entry_text);
-      item.period = item.period || parsed.period;
-      item.time = item.time || parsed.time;
-      item.pickup = parsed.pickup || item.pickup;
-      item.dropoff = parsed.dropoff || item.dropoff;
-      item.customer = item.customer || parsed.customer;
-      item.price = item.price || parsed.price;
-    }
-
-    // Accept pickup/delivery day (DD/MM) and time (HH:MM). Validate delivery >= last pickup + 30min and delivery day not before last pickup day.
-    const ddmmToDate = (ddmm) => {
-      if (!ddmm) return null;
-      const m = ddmm.match(/^(\d{1,2})\/(\d{1,2})$/);
-      if (!m) return null;
-      const day = parseInt(m[1],10);
-      const month = parseInt(m[2],10);
-      if (month < 1 || month > 12) return null;
-      const now = new Date();
-      const year = now.getFullYear();
-      const daysInMonth = new Date(year, month, 0).getDate();
-      if (day < 1 || day > daysInMonth) return null;
-      return new Date(year, month - 1, day);
-    };
-    const timeToMinutes = (t) => {
-      if (!t) return null;
-      const m = t.match(/(\d{1,2})[:\.](\d{2})/);
-      if (!m) return null;
-      return parseInt(m[1],10)*60 + parseInt(m[2],10);
-    };
-
-    // map explicit pickup/dropoff and price fields
-    if (item.pickup_explicit) item.pickup = item.pickup_explicit;
-    if (item.dropoff_explicit) item.dropoff = item.dropoff_explicit;
-    if (item.total_price) item.price = item.total_price;
-
-    // Build new absolute minutes for pickup/delivery if provided
-    let newPickupAbs = null;
-    let newDeliveryAbs = null;
-    if (item.pickup_day && item.pickup_time) {
-      const pd = ddmmToDate(item.pickup_day);
-      const pm = timeToMinutes(item.pickup_time);
-      if (!pd || pm == null) return res.status(400).json({ error: 'Invalid pickup day/time' });
-      const pdt = new Date(pd.getTime()); pdt.setHours(0,0,0,0); pdt.setMinutes(pm);
-      newPickupAbs = Math.floor(pdt.getTime()/60000);
-    } else if (item.start_date && item.start_time) {
-      const sd = ddmmToDate(item.start_date) || null;
-      const sm = timeToMinutes(item.start_time);
-      if (sd && sm != null) {
-        const sdt = new Date(sd.getTime()); sdt.setHours(0,0,0,0); sdt.setMinutes(sm);
-        newPickupAbs = Math.floor(sdt.getTime()/60000);
-      }
-    }
-    if (item.delivery_day && item.delivery_time) {
-      const dd = ddmmToDate(item.delivery_day);
-      const dm = timeToMinutes(item.delivery_time);
-      if (!dd || dm == null) return res.status(400).json({ error: 'Invalid delivery day/time' });
-      const ddt = new Date(dd.getTime()); ddt.setHours(0,0,0,0); ddt.setMinutes(dm);
-      newDeliveryAbs = Math.floor(ddt.getTime()/60000);
-    } else if (item.end_date && item.end_time) {
-      const ed = ddmmToDate(item.end_date) || null;
-      const em = timeToMinutes(item.end_time);
-      if (ed && em != null) {
-        const edt = new Date(ed.getTime()); edt.setHours(0,0,0,0); edt.setMinutes(em);
-        newDeliveryAbs = Math.floor(edt.getTime()/60000);
-      }
-    }
-
-    // enforce delivery (antar/start) earliest 06:00 and pickup (ambil/end) latest 23:00
-    if (newDeliveryAbs != null) {
-      // get minutes of day for delivery_time
-      const delM = timeToMinutes(item.delivery_time || item.end_time || '');
-      if (delM != null && delM < 6*60) return res.status(400).json({ error: 'Delivery (antar) earliest is 06:00' });
-    }
-    if (newPickupAbs != null) {
-      const pickM = timeToMinutes(item.pickup_time || item.start_time || '');
-      if (pickM != null && pickM > 23*60) return res.status(400).json({ error: 'Pickup (ambil) latest is 23:00' });
-    }
-
-    // get latest existing schedule for this motor or plate and perform conflict check if possible
-    let latest = null;
-    if (item.motor_id) {
-      latest = await db.getLatestScheduleByMotorId(item.motor_id).catch(() => null);
-    } else {
-      latest = await db.getLatestScheduleByPlate(plate).catch(() => null);
-    }
-    if (latest) {
-      const lastPickupDay = latest.pickup_day || latest.start_date || null;
-      const lastPickupTime = latest.pickup_time || latest.start_time || null;
-      if (lastPickupDay && lastPickupTime) {
-        const lpd = ddmmToDate(lastPickupDay);
-        const lpm = timeToMinutes(lastPickupTime);
-        if (lpd && lpm != null) {
-          const ldt = new Date(lpd.getTime()); ldt.setHours(0,0,0,0); ldt.setMinutes(lpm);
-          const lastPickupAbs = Math.floor(ldt.getTime()/60000);
-          // if delivery time provided, enforce >= last pickup + 30 minutes
-          if (newDeliveryAbs != null) {
-            const MIN_GAP = 30;
-            if (newDeliveryAbs < lastPickupAbs + MIN_GAP) {
-              return res.status(400).json({ error: `Delivery time must be at least ${MIN_GAP} minutes after last pickup for this vehicle` });
-            }
-          }
-          // if delivery day provided, require delivery day >= last pickup day
-          if (item.delivery_day) {
-            const lastDayOnly = new Date(lpd.getFullYear(), lpd.getMonth(), lpd.getDate());
-            const newD = ddmmToDate(item.delivery_day);
-            if (newD) {
-              const newDayOnly = new Date(newD.getFullYear(), newD.getMonth(), newD.getDate());
-              if (newDayOnly.getTime() < lastDayOnly.getTime()) {
-                return res.status(400).json({ error: 'Delivery day must be the same day or after the last pickup day for this vehicle' });
-              }
-            }
-          }
-        }
-      }
-    }
-
-    const row = await db.addSchedule(item);
-    res.json(row);
-  } catch (err) {
-    res.status(500).json({ error: 'DB error', details: err.message });
-  }
-});
+// API routes moved to routes/api.js
 server.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
 });

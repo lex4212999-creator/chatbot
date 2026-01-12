@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Jadwal Full</title>
+  <style>table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;padding:6px}button{padding:6px 10px}</style>
+</head>
+<body>
+  <h1>Daftar Jadwal (Full)</h1>
+  <div>
+    <button id="refresh">Refresh</button>
+  </div>
+  <div id="msg" style="color:red;margin:8px 0"></div>
+  <table id="tbl">
+    <thead>
+      <tr><th>ID</th><th>No Form</th><th>Nama</th><th>Motor</th><th>Dari</th><th>Sampai</th><th>WA_1</th><th>Aksi</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <script>
+    async function load(){
+      document.getElementById('msg').textContent='';
+      const t = document.querySelector('#tbl tbody'); t.innerHTML='';
+      try{
+        const res = await fetch('/api/schedules/full');
+        if(!res.ok) throw new Error(await res.text());
+        const rows = await res.json();
+        for(const r of rows){
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${r.id||''}</td><td>${r.no_form||''}</td><td>${r.customer||r.name||''}</td><td>${r.motor_jenis||r.vehicle_type||''}</td><td>${r.delivery_day||''} ${r.delivery_time||''}</td><td>${r.pickup_day||''} ${r.pickup_time||''}</td><td>${r.WA_1||''}</td><td><button data-id="${r.id}">Hapus</button></td>`;
+          t.appendChild(tr);
+        }
+      }catch(e){ document.getElementById('msg').textContent = 'Gagal memuat: '+(e.message||e); }
+    }
+    document.getElementById('refresh').addEventListener('click', load);
+    document.querySelector('#tbl').addEventListener('click', async (ev)=>{
+      const btn = ev.target.closest('button'); if(!btn) return;
+      const id = btn.getAttribute('data-id'); if(!id) return;
+      if(!confirm('Hapus jadwal ID '+id+'?')) return;
+      try{
+        const res = await fetch('/api/schedules/'+encodeURIComponent(id), { method: 'DELETE' });
+        if(!res.ok) throw new Error(await res.text());
+        await load();
+      }catch(e){ alert('Gagal hapus: '+(e.message||e)); }
+    });
+    load();
+  </script>
+</body>
+</html>

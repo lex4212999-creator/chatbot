@@ -75,6 +75,40 @@ db.serialize(() => {
     )
   `);
 });
+  // schedule dump table: temporary persisted forms waiting for admin action
+  db.serialize(() => {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS schedule_dump (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        vehicle_type TEXT,
+        plate TEXT,
+        name TEXT,
+        entry_text TEXT,
+        period TEXT,
+        customer TEXT,
+        location TEXT,
+        pickup TEXT,
+        dropoff TEXT,
+        time TEXT,
+        price TEXT,
+        WA_1 TEXT,
+        WA_2 TEXT,
+        start_date TEXT,
+        end_date TEXT,
+        start_time TEXT,
+        end_time TEXT,
+        total_price TEXT,
+        pickup_day TEXT,
+        pickup_time TEXT,
+        delivery_day TEXT,
+        delivery_time TEXT,
+        bulan TEXT,
+        no_form TEXT,
+        client_jid TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+  });
 // motors table: store motor id, jenis (type) and plate
 db.serialize(() => {
   db.run(`
@@ -428,6 +462,47 @@ function addSchedule(item) {
         resolve({ id: this.lastID, ...item });
       }
     );
+  });
+}
+
+function addDumpSchedule(item) {
+  return new Promise((resolve, reject) => {
+    const { vehicle_type, plate, name, entry_text, period, customer, location, pickup, dropoff, time, price, WA_1, WA_2, start_date, end_date, start_time, end_time, total_price, pickup_day, pickup_time, delivery_day, delivery_time, bulan, no_form, client_jid } = item;
+    db.run(
+      `INSERT INTO schedule_dump (vehicle_type, plate, name, entry_text, period, customer, location, pickup, dropoff, time, price, WA_1, WA_2, start_date, end_date, start_time, end_time, total_price, pickup_day, pickup_time, delivery_day, delivery_time, bulan, no_form, client_jid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [vehicle_type || '', plate || '', name || '', entry_text || '', period || '', customer || '', location || '', pickup || '', dropoff || '', time || '', price || '', WA_1 || '', WA_2 || '', start_date || '', end_date || '', start_time || '', end_time || '', total_price || '', pickup_day || '', pickup_time || '', delivery_day || '', delivery_time || '', bulan || '', no_form || '', client_jid || ''],
+      function (err) {
+        if (err) return reject(err);
+        resolve({ id: this.lastID, ...item });
+      }
+    );
+  });
+}
+
+function getDumpScheduleByNoForm(no_form) {
+  return new Promise((resolve, reject) => {
+    db.get(`SELECT * FROM schedule_dump WHERE no_form = ? LIMIT 1`, [String(no_form)], (err, row) => {
+      if (err) return reject(err);
+      resolve(row || null);
+    });
+  });
+}
+
+function deleteDumpScheduleByNoForm(no_form) {
+  return new Promise((resolve, reject) => {
+    db.run(`DELETE FROM schedule_dump WHERE no_form = ?`, [String(no_form)], function(err) {
+      if (err) return reject(err);
+      resolve({ changes: this.changes });
+    });
+  });
+}
+
+function listDumpSchedules() {
+  return new Promise((resolve, reject) => {
+    db.all(`SELECT * FROM schedule_dump ORDER BY id DESC LIMIT 200`, [], (err, rows) => {
+      if (err) return reject(err);
+      resolve(rows || []);
+    });
   });
 }
 
@@ -811,4 +886,15 @@ function listPlates() {
 
 
 
-module.exports = { db,db_stok,db_admin, addQA, listQA, findBestMatch, updateQA, deleteQA, getQA, addSchedule, listSchedules, listAllSchedules, listSchedulesFull, getLatestScheduleByPlate, getLatestScheduleByMotorId, getMotorById, addMotor, listMotors, updateMotor, deleteMotor, changeMotorId, clearData, deleteSchedule, deleteSchedulesByPickupDay, clearSchedules, listPlates, findAvailableMotorsWindow, findMotorsAvailability };
+module.exports = {
+  db, db_stok, db_admin,
+  addQA, listQA, findBestMatch, updateQA, deleteQA, getQA,
+  addSchedule, listSchedules, listAllSchedules, listSchedulesFull,
+  getLatestScheduleByPlate, getLatestScheduleByMotorId,
+  getMotorById, addMotor, listMotors, updateMotor, deleteMotor, changeMotorId,
+  clearData, deleteSchedule, deleteSchedulesByPickupDay, clearSchedules,
+  listPlates, findAvailableMotorsWindow, findMotorsAvailability,
+  // dump table helpers
+  addDumpSchedule, getDumpScheduleByNoForm, deleteDumpScheduleByNoForm, listDumpSchedules
+};
+
