@@ -109,6 +109,29 @@ db.serialize(() => {
       )
     `);
   });
+  // ensure schedule_dump has motor_id and harga columns for nota persistence
+  db.all(`PRAGMA table_info(schedule_dump)`, [], (err, cols) => {
+    if (err) return console.error('PRAGMA table_info(schedule_dump) error:', err && err.message);
+    const existing = (cols || []).map(c => c.name);
+    if (!existing.includes('motor_id')) {
+      db.run(`ALTER TABLE schedule_dump ADD COLUMN motor_id INTEGER`, (e) => {
+        if (e) console.error('Failed to add motor_id to schedule_dump:', e.message);
+        else console.log('Added motor_id to schedule_dump');
+      });
+    }
+    if (!existing.includes('harga_24')) {
+      db.run(`ALTER TABLE schedule_dump ADD COLUMN harga_24 TEXT`, (e) => {
+        if (e) console.error('Failed to add harga_24 to schedule_dump:', e.message);
+        else console.log('Added harga_24 to schedule_dump');
+      });
+    }
+    if (!existing.includes('harga_12')) {
+      db.run(`ALTER TABLE schedule_dump ADD COLUMN harga_12 TEXT`, (e) => {
+        if (e) console.error('Failed to add harga_12 to schedule_dump:', e.message);
+        else console.log('Added harga_12 to schedule_dump');
+      });
+    }
+  });
 // motors table: store motor id, jenis (type) and plate
 db.serialize(() => {
   db.run(`
@@ -497,6 +520,16 @@ function deleteDumpScheduleByNoForm(no_form) {
   });
 }
 
+function updateDumpScheduleHarga(no_form, total_price, harga_24, harga_12, motor_id) {
+  return new Promise((resolve, reject) => {
+    const sql = `UPDATE schedule_dump SET total_price = ?, price = ?, harga_24 = ?, harga_12 = ?, motor_id = ? WHERE no_form = ?`;
+    db.run(sql, [String(total_price || ''), String(total_price || ''), harga_24 !== undefined ? String(harga_24) : '', harga_12 !== undefined ? String(harga_12) : '', motor_id || null, String(no_form)], function(err) {
+      if (err) return reject(err);
+      resolve({ changes: this.changes });
+    });
+  });
+}
+
 function listDumpSchedules() {
   return new Promise((resolve, reject) => {
     db.all(`SELECT * FROM schedule_dump ORDER BY id DESC LIMIT 200`, [], (err, rows) => {
@@ -636,6 +669,16 @@ function getMotorById(id) {
     db.get(`SELECT id, jenis, plate, harga_24, harga_12, created_at FROM motors WHERE id = ?`, [id], (err, row) => {
       if (err) return reject(err);
       resolve(row);
+    });
+  });
+}
+
+function getMotorByJenis(jenis) {
+  return new Promise((resolve, reject) => {
+    if (!jenis) return resolve(null);
+    db.get(`SELECT id, jenis, plate, harga_24, harga_12, created_at FROM motors WHERE LOWER(jenis) = LOWER(?) LIMIT 1`, [String(jenis).trim()], (err, row) => {
+      if (err) return reject(err);
+      resolve(row || null);
     });
   });
 }
@@ -895,6 +938,7 @@ module.exports = {
   clearData, deleteSchedule, deleteSchedulesByPickupDay, clearSchedules,
   listPlates, findAvailableMotorsWindow, findMotorsAvailability,
   // dump table helpers
-  addDumpSchedule, getDumpScheduleByNoForm, deleteDumpScheduleByNoForm, listDumpSchedules
+  addDumpSchedule, getDumpScheduleByNoForm, deleteDumpScheduleByNoForm, listDumpSchedules,
+  getMotorByJenis, updateDumpScheduleHarga
 };
 

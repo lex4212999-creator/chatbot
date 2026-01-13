@@ -66,7 +66,18 @@ async function handleAdmin({ from, text, msg, client, db, sessions, db_admin, Me
         }
         if (overlapFound) { await client.sendMessage(from, `Motor ID ${chosenId} sedang sibuk pada interval yang diminta. Pilih motor lain atau ketik 'cancel'.`); return true; }
 
-        const nota = p.nota;
+        const nota = p.nota || {};
+        // try to read persisted dump (if present) to get computed harga/total
+        let dump = null;
+        try {
+          if (nota.no_form && db.getDumpScheduleByNoForm) {
+            dump = await db.getDumpScheduleByNoForm(nota.no_form).catch(() => null);
+          }
+        } catch (e) { dump = null; }
+
+        const final_total = (dump && (dump.total_price || dump.price)) || nota.total_price || nota.price || '';
+        const final_wa = (dump && (dump.WA_1 || dump.WA)) || nota.WA_1 || nota.WA || '';
+
         const item = {
           vehicle_type: motor.jenis || nota.vehicle_type || nota.motor_jenis || '',
           motor_id: motor.id,
@@ -77,10 +88,11 @@ async function handleAdmin({ from, text, msg, client, db, sessions, db_admin, Me
           pickup_time: nota.pickup_time || nota.end_time || '',
           pickup: nota.pickup || '',
           dropoff: nota.dropoff || '',
-          total_price: nota.total_price || nota.price || '',
+          total_price: final_total,
+          price: (dump && dump.price) || nota.price || '',
           entry_text: nota.entry_text || '',
           customer: nota.customer || nota.name || '',
-          WA_1: nota.WA_1 || nota.WA || '' ,
+          WA_1: final_wa,
           no_form: nota.no_form || ''
         };
         const row = await db.addSchedule(item);

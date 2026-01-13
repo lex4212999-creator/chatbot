@@ -1453,8 +1453,17 @@ client.onMessage(async (msg) => {
         const rem = totalHours - full24*24;
         const use12 = rem > 0 ? 1 : 0;
 
-        // get motor pricing
-        const motor = await db.getMotorById(schedule.motor_id || schedule.motorId || schedule.motor_id).catch(()=>null);
+        // get motor pricing: prefer motor_id, fallback to jenis lookup
+        let motor = null;
+        try {
+          if (db.getMotorById) motor = await db.getMotorById(schedule.motor_id || schedule.motorId || null).catch(()=>null);
+        } catch (e) { motor = null; }
+        if (!motor) {
+          const jenisLookup = schedule.motor_jenis || schedule.vehicle_type || schedule.jenis || null;
+          if (jenisLookup && db.getMotorByJenis) {
+            try { motor = await db.getMotorByJenis(jenisLookup).catch(()=>null); } catch (e) { motor = null; }
+          }
+        }
         const raw24 = motor && motor.harga_24 ? String(motor.harga_24) : '';
         const raw12 = motor && motor.harga_12 ? String(motor.harga_12) : '';
         const parsePrice = (s) => { if (!s) return 0; const n = String(s).replace(/[^0-9]/g,''); return n ? parseInt(n,10) : 0; };
@@ -1464,6 +1473,19 @@ client.onMessage(async (msg) => {
 
         const subtotal = full24 * harga24 + use12 * harga12;
         const total = subtotal + ongkir;
+
+        // persist computed harga back to schedule_dump (if present) so /admin add jadwal can use it
+        try {
+          if (db.updateDumpScheduleHarga && schedule.no_form) {
+            await db.updateDumpScheduleHarga(schedule.no_form, total, harga24, harga12, motor && motor.id ? motor.id : null).catch(()=>null);
+          }
+          // also update in-memory session if available
+          if (schedule.client_jid && sessions && sessions[schedule.client_jid] && sessions[schedule.client_jid].form && sessions[schedule.client_jid].form.no_form && String(sessions[schedule.client_jid].form.no_form) === String(schedule.no_form)) {
+            sessions[schedule.client_jid].form.total_price = String(total);
+            sessions[schedule.client_jid].form.harga_24 = String(harga24);
+            sessions[schedule.client_jid].form.harga_12 = String(harga12);
+          }
+        } catch (e) { /* ignore persistence errors */ }
 
         const lines = [];
         lines.push(`Nota untuk jadwal ID ${schedule.id}:`);
