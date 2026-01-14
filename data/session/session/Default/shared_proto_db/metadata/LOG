@@ -1,3 +1,3 @@
-2026/01/12-23:44:14.265 2e5c Reusing MANIFEST C:\project\data\session\session\Default\shared_proto_db\metadata/MANIFEST-000001
-2026/01/12-23:44:14.268 2e5c Recovering log #3
-2026/01/12-23:44:14.269 2e5c Reusing old log C:\project\data\session\session\Default\shared_proto_db\metadata/000003.log 
+2026/01/14-11:02:28.549 323c Reusing MANIFEST C:\project\data\session\session\Default\shared_proto_db\metadata/MANIFEST-000001
+2026/01/14-11:02:28.551 323c Recovering log #3
+2026/01/14-11:02:28.552 323c Reusing old log C:\project\data\session\session\Default\shared_proto_db\metadata/000003.log 

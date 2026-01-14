@@ -241,16 +241,7 @@ db.all(`PRAGMA table_info(schedules)`, [], (err, cols) => {
     if (err2) return console.error('seed check error', err2.message);
     if (row && row.c === 0) {
       const samples = [
-        { vehicle_type: 'NMAX', plate: 'NMAX PUTIH 5292', entry_text: '2-4/sektio mukti wibowo/jw naungan/07.00/380', period: '2-4', customer: 'sektio mukti wibowo', location: 'jw naungan', time: '07.00', price: '380' },
-        { vehicle_type: 'NMAX', plate: 'NMAX BIRU 3848 HU', entry_text: '3-4/beni/helin/19.00/150', period: '3-4', customer: 'beni', location: 'helin', time: '19.00', price: '150' },
-        { vehicle_type: 'PCX', plate: 'PCX 6636 ES', entry_text: '2-3/slamet ari wibowo/balapan/09.30-09.00/200', period: '2-3', customer: 'slamet ari wibowo', location: 'balapan', time: '09.30-09.00', price: '200' },
-        { vehicle_type: 'PCX', plate: 'PCX 6636 ES', entry_text: '3-3/ribhky amino saleh/purwosari-balapan/08.00-19.00/170', period: '3-3', customer: 'ribhky amino saleh', location: 'purwosari-balapan', time: '08.00-19.00', price: '170' },
-        { vehicle_type: 'VARIO', plate: 'VARIO HITAM 4793 BAF', entry_text: '2-5/nanda putri andriani/lorin/15.00-12.00/330', period: '2-5', customer: 'nanda putri andriani', location: 'lorin', time: '15.00-12.00', price: '330' },
-        { vehicle_type: 'VARIO', plate: 'VARIO MERAH 5306 APB', entry_text: '3-3/daffa ahmad reyhan/balapan/09.15-18.00/140', period: '3-3', customer: 'daffa ahmad reyhan', location: 'balapan', time: '09.15-18.00', price: '140' },
-        { vehicle_type: 'SCOOPY', plate: 'SCOOPY 6382 BNE', entry_text: '3-3/nuraini putri salsabilla/balapan/09.00-17.00/130', period: '3-3', customer: 'nuraini putri salsabilla', location: 'balapan', time: '09.00-17.00', price: '130' },
-        { vehicle_type: 'SCOOPY', plate: 'SCOOPY 6824 ATB', entry_text: '3-3/novendra bara mukti/cititrans-balapan/08.00-17.00/120', period: '3-3', customer: 'novendra bara mukti', location: 'cititrans-balapan', time: '08.00-17.00', price: '120' },
-        { vehicle_type: 'BEAT', plate: 'BEAT 5756 BEE', entry_text: '2-4/lili agus supriyanto/orchid/14.00-08.00/230', period: '2-4', customer: 'lili agus supriyanto', location: 'orchid', time: '14.00-08.00', price: '230' },
-        { vehicle_type: 'BEAT', plate: 'BEAT 6972 JC', entry_text: '2-4/asti eristiasa/dpalma/14.00/230', period: '2-4', customer: 'asti eristiasa', location: 'dpalma', time: '14.00', price: '230' }
+       { vehicle_type: 'BEAT', plate: 'BEAT 6972 JC', entry_text: '2-4/asti eristiasa/dpalma/14.00/230', period: '2-4', customer: 'asti eristiasa', location: 'dpalma', time: '14.00', price: '230' }
       ];
           const stmt = db.prepare(`INSERT INTO schedules (vehicle_type, plate, name, entry_text, period, customer, location, pickup, dropoff, time, price, start_date, end_date, start_time, end_time, total_price, pickup_day, pickup_time, delivery_day, delivery_time, bulan) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
           samples.forEach(s => stmt.run(s.vehicle_type, s.plate, s.name || '', s.entry_text, s.period, s.customer, s.location, s.pickup || '', s.dropoff || '', s.time, s.price, s.start_date || '', s.end_date || '', s.start_time || '', s.end_time || '', s.total_price || '', s.pickup_day || '', s.pickup_time || '', s.delivery_day || '', s.delivery_time || '', s.bulan || ''));

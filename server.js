@@ -32,6 +32,22 @@ const upload = multer({ dest: path.join(__dirname, 'data', 'uploads') });
 
 let sessions = {};
 
+// kota KTP yang tidak dilayani
+const bannedKtpCities = new Set(['solo','surakarta','klaten','klate','boyolali','sragen','karanganyar','wonogiri']);
+function isBannedKtpCity(city) {
+  if (!city) return false;
+  const c = (city || '').toString().toLowerCase().replace(/[^a-z0-9\s]/g, ' ').trim();
+  if (!c) return false;
+  // cek tokenized words dan substring
+  const parts = c.split(/\s+/).filter(Boolean);
+  for (const b of bannedKtpCities) {
+    if (c === b) return true;
+    if (parts.includes(b)) return true;
+    if (c.indexOf(b) !== -1) return true;
+  }
+  return false;
+}
+
 // API routes will be mounted after WhatsApp client is initialized (below)
 
 const client = new WhatsAppService(SESSION_PATH);
@@ -274,6 +290,12 @@ client.onMessage(async (msg) => {
         WA_1: form.wa_1 || '',
         WA_2: form.wa_2 || ''
       };
+      // cek kota KTP terlarang sebelum melanjutkan
+      if (isBannedKtpCity(sessions[from].form.ktp_city)) {
+        delete sessions[from].form;
+        await client.sendMessage(from, 'maaf tidak menerima sewa dari domisili sana ka..');
+        return;
+      }
       sessions[from].flow = 'waiting_photos';
       sessions[from].photos = [];
       await client.sendMessage(from, 'Data diterima dan valid. Silakan fotokan KTP dan jaminan (NPWP/KK/kartu nama). Kirim foto sekarang.');
@@ -356,6 +378,12 @@ client.onMessage(async (msg) => {
           WA_1: form.wa_1 || '',
           WA_2: form.wa_2 || ''
         };
+        // cek kota KTP terlarang sebelum melanjutkan
+        if (isBannedKtpCity(sessions[from].form.ktp_city)) {
+          delete sessions[from].form; delete sessions[from].missing; delete sessions[from].partialForm;
+          await client.sendMessage(from, 'maaf tidak menerima sewa dari domisili sana ka..');
+          return;
+        }
         sessions[from].flow = 'waiting_photos';
         sessions[from].photos = [];
         delete sessions[from].missing; delete sessions[from].partialForm;
@@ -437,6 +465,12 @@ client.onMessage(async (msg) => {
         WA_1: form.wa_1 || '',
         WA_2: form.wa_2 || ''
       };
+      // cek kota KTP terlarang sebelum melanjutkan
+      if (isBannedKtpCity(sessions[from].form.ktp_city)) {
+        delete sessions[from].form;
+        await client.sendMessage(from, 'aka, maaf tidak menerima sewa dari domisili sana ka..');
+        return;
+      }
       sessions[from].flow = 'waiting_photos';
       sessions[from].photos = [];
       await client.sendMessage(from, 'Data diterima dan valid. Silakan fotokan KTP dan jaminan (NPWP/KK/kartu nama). Kirim foto sekarang.');
@@ -740,7 +774,7 @@ client.onMessage(async (msg) => {
     }
 
     // Delete schedules yesterday and earlier: '/admin delete jadwal -1'
-    if (text.startsWith('/admin delete jadwal -1')) {
+    if (text.startsWith('/admin hapus jadwal -1')) {
       try {
         const now = new Date();
         const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
@@ -1266,7 +1300,7 @@ client.onMessage(async (msg) => {
       }
     }
 
-    if (text.startsWith('/admin list motors')) {
+    if (text.startsWith('/admin list motor')) {
       try {
         const rows = await db.listMotors();
         if (!rows.length) return client.sendMessage(from, 'Belum ada motor.');
@@ -1316,7 +1350,7 @@ client.onMessage(async (msg) => {
     }
 
     // schedule management via chat
-    if (text.startsWith('/admin list schedules')) {
+    if (text.startsWith('/admin list jadwal')) {
       try {
         const rows = await db.listAllSchedules ? await db.listAllSchedules() : await db.listSchedules();
         if (!rows.length) return client.sendMessage(from, 'Belum ada jadwal.');

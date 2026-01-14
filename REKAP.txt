@@ -1,0 +1,27 @@
+REKAP PROYEK — 2026-01-14
+
+1) Status umum:
+- Handler admin ada di handlers/adminCommands.js: implementasi `/admin login` (autentikasi menggunakan user|pass) dan mekanisme sesi (`sessions[from].pendingAction`) untuk konfirmasi tindakan.
+- Terdapat alur pendingAction: konfirmasi 'yes' untuk `clear_schedules`, dan alur 'choose_motor' yang menerima ID motor atau 'cancel'.
+- `nlp-runner.js` memuat model dari `data/nlp_model.nlp` (jalankan `node nlp-train.js` jika belum ada).
+
+2) Perintah `/admin` yang terdeteksi:
+- `/admin login` — di-handle di `handlers/adminCommands.js`.
+- `/admin list` — dikenali di model NLP (`admin.list` intent) namun tidak terlihat handler eksplisit di `handlers/adminCommands.js`.
+- Perintah terkait admin lain dikontrol lewat sesi/pendingAction (konfirmasi, pilihan motor, batal).
+
+3) NLP yang sudah dimasukkan / terdaftar:
+- File model: `model.nlp` (root) dan `data/nlp_model.nlp` (dipakai oleh `nlp-runner.js`).
+- Intents utama (ringkasan):
+  - `availability.query`, `booking.request`, `list.motors`, `admin.login`, `admin.list`,
+  - `greetings.hello`, `confirm.yes`, `confirm.no`, `form.provide`, `identity.provide`,
+  - `DP`, `No.DP`, `Jam.operasional`, `bensin`, `bukti.TF`, `thanks`, `No.sim`, dan lainnya.
+  (Lihat `model.nlp` untuk daftar lengkap dan contoh utterances.)
+- Utilitas NLP ada di `nlp.js`: `normalize`, `bestAnswer`, `textSimilarity`, `parseAvailabilityRequest`, `parseBookingRequest`.
+- `nlp-runner.js` menggunakan `node-nlp` `NlpManager` dan mencoba memuat `data/nlp_model.nlp`.
+
+4) Saran / langkah berikutnya:
+- Tambahkan handler untuk `/admin list` jika ingin hasil daftar admin melalui chat.
+- Pastikan `data/nlp_model.nlp` up-to-date dengan menjalankan `node nlp-train.js` bila perlu.
+
+File ini dibuat otomatis: REKAP.txt

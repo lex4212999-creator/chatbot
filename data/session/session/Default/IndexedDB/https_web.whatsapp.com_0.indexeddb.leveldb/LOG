@@ -1,27 +1,15 @@
-2026/01/13-11:55:23.377 11dc Reusing MANIFEST C:\project\data\session\session\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
-2026/01/13-11:55:23.378 11dc Recovering log #1218
-2026/01/13-11:55:23.513 11dc Reusing old log C:\project\data\session\session\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/001218.log 
-2026/01/13-11:55:23.513 11dc Delete type=2 #1212
-2026/01/13-11:55:23.513 11dc Delete type=2 #1213
-2026/01/13-11:55:23.513 11dc Delete type=2 #1214
-2026/01/13-11:55:23.513 11dc Delete type=2 #1215
-2026/01/13-11:55:23.513 11dc Delete type=2 #1216
-2026/01/13-11:55:23.513 11dc Delete type=2 #1219
-2026/01/13-11:55:31.249 3990 Level-0 table #1227: started
-2026/01/13-11:55:31.307 3990 Level-0 table #1227: 596684 bytes OK
-2026/01/13-11:55:31.314 3990 Delete type=0 #1218
-2026/01/13-11:55:31.316 3990 Manual compaction at level-0 from ' V\x01\x00\x00\x00' @ 72057594037927935 : 1 .. ' W\x01\x00\x00\x00' @ 0 : 0; will stop at (end)
-2026/01/13-11:55:31.628 11dc Compacting 1@1 + 5@2 files
-2026/01/13-11:55:32.146 11dc Generated table #1228@1: 88770 keys, 2238676 bytes
-2026/01/13-11:55:32.614 11dc Generated table #1229@1: 58787 keys, 2429680 bytes
-2026/01/13-11:55:32.868 11dc Generated table #1230@1: 17741 keys, 2164796 bytes
-2026/01/13-11:55:33.238 11dc Generated table #1231@1: 22812 keys, 2168251 bytes
-2026/01/13-11:55:33.395 11dc Generated table #1232@1: 32787 keys, 637526 bytes
-2026/01/13-11:55:33.395 11dc Compacted 1@1 + 5@2 files => 9638929 bytes
-2026/01/13-11:55:33.401 11dc compacted to: files[ 0 0 5 0 0 0 0 ]
-2026/01/13-11:55:33.402 11dc Delete type=2 #1220
-2026/01/13-11:55:33.402 11dc Delete type=2 #1221
-2026/01/13-11:55:33.402 11dc Delete type=2 #1222
-2026/01/13-11:55:33.402 11dc Delete type=2 #1223
-2026/01/13-11:55:33.402 11dc Delete type=2 #1224
-2026/01/13-11:55:33.402 11dc Delete type=2 #1227
+2026/01/14-16:07:33.544 340c Reusing MANIFEST C:\project\data\session\session\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/01/14-16:07:33.545 340c Recovering log #1273
+2026/01/14-16:07:33.720 340c Reusing old log C:\project\data\session\session\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/001273.log 
+2026/01/14-16:07:39.592 19bc Level-0 table #1282: started
+2026/01/14-16:07:39.663 19bc Level-0 table #1282: 911207 bytes OK
+2026/01/14-16:07:39.667 19bc Delete type=0 #1273
+2026/01/14-16:07:39.669 19bc Manual compaction at level-0 from ' \\x01\x00\x00\x00' @ 72057594037927935 : 1 .. ' ]\x01\x00\x00\x00' @ 0 : 0; will stop at (end)
+2026/01/14-16:07:39.900 19bc Compacting 1@1 + 5@2 files
+2026/01/14-16:07:40.328 19bc Generated table #1283@1: 89087 keys, 2239231 bytes
+2026/01/14-16:07:40.747 19bc Generated table #1284@1: 62317 keys, 2447967 bytes
+2026/01/14-16:07:40.956 19bc Generated table #1285@1: 17495 keys, 2162013 bytes
+2026/01/14-16:07:41.273 19bc Generated table #1286@1: 19621 keys, 2169543 bytes
+2026/01/14-16:07:41.594 19bc Generated table #1287@1: 44202 keys, 1158670 bytes
+2026/01/14-16:07:41.594 19bc Compacted 1@1 + 5@2 files => 10177424 bytes
+2026/01/14-16:07:41.598 19bc compacted to: files[ 0 0 5 0 0 0 0 ]
